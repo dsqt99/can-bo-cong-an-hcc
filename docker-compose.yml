@@ -8,16 +8,16 @@ services:
       - "8668:8668"
     env_file:
       - ./backend/.env
-    # Mở comment phần volumes dưới đây nếu muốn code tự động cập nhật khi dev (hot-reload)
-    # Tuy nhiên nếu dùng volumes thì lệnh CMD trong Dockerfile cần thêm tham số --reload
-    # volumes:
-    #   - ./backend:/app
     restart: unless-stopped
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        # Optional: set VITE_API_URL only when frontend and backend are on separate domains.
+        # Leave empty (default) when using a reverse proxy on the same domain.
+        - VITE_API_URL=${VITE_API_URL:-}
     container_name: voice-bot-frontend
     ports:
       - "5173:5173"
