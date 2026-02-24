@@ -3,10 +3,9 @@ import { Message, AppState, WebSocketMessage, Emotion } from '../types';
 import { SettingsData } from '../components/Settings';
 
 const envUrl = import.meta.env.VITE_API_URL || '';
-const apiPort = envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668';
-const HTTP_URL = envUrl && !envUrl.includes('localhost')
+const HTTP_URL = envUrl && !envUrl.includes('localhost') && !envUrl.includes('127.0.0.1')
     ? envUrl
-    : `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
+    : `${window.location.protocol}//${window.location.hostname}:${envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668'}`;
 const WS_URL = HTTP_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/chat';
 export const useAudioStream = (settings?: SettingsData) => {
     const [isConnected, setIsConnected] = useState(false);

@@ -74,10 +74,12 @@ export const MessageList: React.FC<MessageListProps> = ({
     // Prepare audio data
     let audio = msg.audioData || audioCache[msg.id];
     const envUrl = import.meta.env.VITE_API_URL || '';
-    const apiPort = envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668';
-    const HTTP_URL = envUrl && !envUrl.includes('localhost')
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    const HTTP_URL = envUrl
       ? envUrl
-      : `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
+      : isLocal
+        ? `${window.location.protocol}//${window.location.hostname}:8668`
+        : window.location.origin;
     const ttsUrl = `${HTTP_URL}/api/tts`;
 
     // If no audio (only for AI), fetch TTS

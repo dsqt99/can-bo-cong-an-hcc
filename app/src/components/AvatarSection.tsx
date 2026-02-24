@@ -17,10 +17,9 @@ interface AvatarSectionProps {
 }
 
 const envUrl = import.meta.env.VITE_API_URL || '';
-const apiPort = envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668';
-const HTTP_URL = envUrl && !envUrl.includes('localhost')
+const HTTP_URL = envUrl && !envUrl.includes('localhost') && !envUrl.includes('127.0.0.1')
     ? envUrl
-    : `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
+    : `${window.location.protocol}//${window.location.hostname}:${envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668'}`;
 const EMOJI_BASE_URL = `${HTTP_URL}/emojis`;
 const EMOJI_MAP: Record<string, string> = {
     'NEUTRAL': 'happy.jpeg',
