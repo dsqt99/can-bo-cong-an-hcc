@@ -16,7 +16,8 @@ interface AvatarSectionProps {
     mode: 'voice' | 'chat';
 }
 
-const EMOJI_BASE_URL = 'http://localhost:8000/emojis';
+const HTTP_URL = import.meta.env.VITE_API_URL || 'http://localhost:8668';
+const EMOJI_BASE_URL = `${HTTP_URL}/emojis`;
 const EMOJI_MAP: Record<string, string> = {
     'NEUTRAL': 'happy.jpeg',
     'HAPPY': 'happy.jpeg',
@@ -202,7 +203,11 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
                                 alt="Cán bộ ảo AI"
                                 className="w-full h-full object-cover transition-transform duration-500"
                                 onError={(e) => {
-                                    (e.target as HTMLImageElement).src = 'https://via.placeholder.com/300x300?text=CA+AI';
+                                    const target = e.target as HTMLImageElement;
+                                    const fallback = 'https://via.placeholder.com/300x300?text=CA+AI';
+                                    if (target.src !== fallback) {
+                                        target.src = fallback;
+                                    }
                                 }}
                             />
 

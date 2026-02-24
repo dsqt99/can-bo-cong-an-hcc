@@ -51,6 +51,7 @@ export const MessageList: React.FC<MessageListProps> = ({
           currentSourceRef.current.stop();
         } catch (e) {
           // Already stopped
+          console.debug('Audio already stopped during cleanup', e);
         }
       }
     };
@@ -62,7 +63,9 @@ export const MessageList: React.FC<MessageListProps> = ({
       if (currentSourceRef.current) {
         try {
           currentSourceRef.current.stop();
-        } catch (e) { }
+        } catch (e) {
+          console.debug('Audio already stopped', e);
+        }
       }
       setPlayingMessageId(null);
       return;
@@ -70,12 +73,14 @@ export const MessageList: React.FC<MessageListProps> = ({
 
     // Prepare audio data
     let audio = msg.audioData || audioCache[msg.id];
+    const HTTP_URL = import.meta.env.VITE_API_URL || 'http://localhost:8668';
+    const ttsUrl = `${HTTP_URL}/api/tts`;
 
     // If no audio (only for AI), fetch TTS
     if (!audio && msg.type === 'ai' && msg.text) {
       setLoadingMessageId(msg.id);
       try {
-        const res = await fetch('http://localhost:8000/api/tts', {
+        const res = await fetch(ttsUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text: msg.text })
@@ -110,6 +115,7 @@ export const MessageList: React.FC<MessageListProps> = ({
         currentSourceRef.current.stop();
       } catch (e) {
         // Already stopped
+        console.debug('Audio already stopped', e);
       }
     }
 
