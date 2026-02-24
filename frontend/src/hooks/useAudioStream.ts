@@ -2,7 +2,8 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Message, AppState, WebSocketMessage, Emotion } from '../types';
 import { SettingsData } from '../components/Settings';
 
-const WS_URL = 'ws://localhost:8000/ws/chat';
+const HTTP_URL = import.meta.env.VITE_API_URL || 'http://localhost:8668';
+const WS_URL = HTTP_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/chat';
 
 export const useAudioStream = (settings?: SettingsData) => {
   const [isConnected, setIsConnected] = useState(false);
