@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: voice-bot-backend
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env
+    # Mở comment phần volumes dưới đây nếu muốn code tự động cập nhật khi dev (hot-reload)
+    # Tuy nhiên nếu dùng volumes thì lệnh CMD trong Dockerfile cần thêm tham số --reload
+    # volumes:
+    #   - ./backend:/app
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: voice-bot-frontend
+    ports:
+      - "4173:4173"
+    environment:
+      # Truyền URL backend vào frontend nếu cần thiết (phụ thuộc vào file .env của frontend)
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - backend
+    restart: unless-stopped

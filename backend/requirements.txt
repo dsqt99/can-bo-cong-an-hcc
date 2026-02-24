@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-multipart
+websockets
+ffmpeg-python
+numpy
+soundfile
+python-dotenv
+openai
+google-ai-generativelanguage
+langchain-google-genai
+langchain-core
+gradio_client
