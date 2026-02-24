@@ -15,7 +15,7 @@ COPY . .
 RUN npm run build
 
 # Expose Vite preview port
-EXPOSE 4173
+EXPOSE 5173
 
 # Run Vite preview to serve the built application
-CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "4173"]
+CMD ["npm", "run", "preview", "--", "--host", "0.0.0.0", "--port", "5173"]
