@@ -18,7 +18,11 @@ interface AvatarSectionProps {
   onToggleChat?: () => void;
 }
 
-const HTTP_URL = import.meta.env.VITE_API_URL || 'http://localhost:8668';
+const envUrl = import.meta.env.VITE_API_URL || '';
+const apiPort = envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668';
+const HTTP_URL = envUrl && !envUrl.includes('localhost')
+  ? envUrl
+  : `${window.location.protocol}//${window.location.hostname}:${apiPort}`;
 const EMOJI_BASE_URL = `${HTTP_URL}/emojis`;
 const EMOJI_MAP: Record<string, string> = {
   'NEUTRAL': 'happy.jpeg',
