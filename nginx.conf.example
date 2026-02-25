@@ -1,0 +1,87 @@
+# ============================================
+# Hướng dẫn cấu hình Nginx Proxy Manager
+# cho Voice Bot AI (Public Domain)
+# ============================================
+#
+# Khi deploy lên server với domain công khai (vd: chatbot.example.com),
+# bạn cần cấu hình Nginx Proxy Manager để route traffic đến
+# cả frontend (port 5173) và backend (port 8668).
+#
+# QUAN TRỌNG: Frontend đã tự động detect public domain và dùng
+# window.location.origin để kết nối backend → KHÔNG cần set VITE_API_URL
+#
+# ============================================
+# CÁCH 1: Dùng 1 domain duy nhất (khuyến nghị)
+# ============================================
+#
+# Bước 1: Tạo Proxy Host cho FRONTEND
+#   - Domain: chatbot.example.com
+#   - Scheme: http
+#   - Forward Hostname/IP: <IP server hoặc localhost>
+#   - Forward Port: 5173
+#   - ✅ Websockets Support: BẬT
+#   - SSL: Bật Let's Encrypt nếu cần HTTPS
+#
+# Bước 2: Thêm Custom Location cho BACKEND API
+#   Trong Proxy Host vừa tạo → tab "Custom Locations":
+#
+#   Location 1: /api/
+#     - Scheme: http
+#     - Forward Hostname/IP: <IP server hoặc localhost>
+#     - Forward Port: 8668
+#     - Gear icon (⚙) → Advanced:
+#       proxy_read_timeout 300s;
+#       proxy_send_timeout 300s;
+#
+#   Location 2: /ws/
+#     - Scheme: http
+#     - Forward Hostname/IP: <IP server hoặc localhost>
+#     - Forward Port: 8668
+#     - Gear icon (⚙) → Advanced:
+#       proxy_http_version 1.1;
+#       proxy_set_header Upgrade $http_upgrade;
+#       proxy_set_header Connection "upgrade";
+#       proxy_read_timeout 86400s;
+#       proxy_send_timeout 86400s;
+#
+#   Location 3: /emojis/
+#     - Scheme: http
+#     - Forward Hostname/IP: <IP server hoặc localhost>
+#     - Forward Port: 8668
+#
+# ============================================
+# CÁCH 2: Dùng 2 domain riêng biệt
+# ============================================
+#
+# Nếu muốn tách riêng frontend và backend:
+#
+# Proxy Host 1 - Frontend:
+#   - Domain: chatbot.example.com
+#   - Forward Port: 5173
+#   - ✅ Websockets Support: BẬT
+#
+# Proxy Host 2 - Backend:
+#   - Domain: api-chatbot.example.com
+#   - Forward Port: 8668
+#   - ✅ Websockets Support: BẬT (cho /ws/chat)
+#
+# Nếu dùng cách 2, bạn CẦN set biến môi trường trước khi build:
+#   VITE_API_URL=https://api-chatbot.example.com docker compose up --build
+#
+# ============================================
+# ADVANCED CONFIG (tab Advanced trong NPM)
+# ============================================
+#
+# Nếu cần thêm cấu hình nâng cao, paste vào tab "Advanced"
+# của Proxy Host chính (chatbot.example.com):
+#
+# # Tăng kích thước upload (cho audio files)
+# client_max_body_size 50M;
+#
+# # Cache emoji/static files
+# location /emojis/ {
+#     proxy_pass http://<IP>:8668/emojis/;
+#     proxy_cache_valid 200 7d;
+#     expires 7d;
+#     add_header Cache-Control "public, immutable";
+# }

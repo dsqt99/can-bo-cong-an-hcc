@@ -3,6 +3,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Message, AppState } from '../types';
 import { User, Send, Volume2, VolumeX, Loader2, ShieldCheck, MessageCircle } from 'lucide-react';
+import { TTS_API_URL } from '../config/api';
 
 interface MessageListProps {
     messages: Message[];
@@ -68,16 +69,11 @@ export const MessageList: React.FC<MessageListProps> = ({
         }
 
         let audio = msg.audioData || audioCache[msg.id];
-        const envUrl = import.meta.env.VITE_API_URL || '';
-        const HTTP_URL = envUrl && !envUrl.includes('localhost') && !envUrl.includes('127.0.0.1')
-            ? envUrl
-            : `${window.location.protocol}//${window.location.hostname}:${envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668'}`;
-        const ttsUrl = `${HTTP_URL}/api/tts`;
 
         if (!audio && msg.type === 'ai' && msg.text) {
             setLoadingMessageId(msg.id);
             try {
-                const res = await fetch(ttsUrl, {
+                const res = await fetch(TTS_API_URL, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ text: msg.text })

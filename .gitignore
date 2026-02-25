@@ -4,3 +4,9 @@ node_modules
 __pycache__
 .venv
 .log
+.agent
+docs
+.editorconfig
+.gitattributes
+ERRORS.md
+GEMINI.md

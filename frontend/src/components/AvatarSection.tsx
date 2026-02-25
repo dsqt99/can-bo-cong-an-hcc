@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { Mic, MicOff, AlertCircle, PanelRight } from 'lucide-react';
 import { AppState, Emotion } from '../types';
 import { AudioVisualizer } from './AudioVisualizer';
+import { EMOJI_BASE_URL } from '../config/api';
 
 interface AvatarSectionProps {
   appState: AppState;
@@ -18,14 +19,6 @@ interface AvatarSectionProps {
   onToggleChat?: () => void;
 }
 
-const envUrl = import.meta.env.VITE_API_URL || '';
-const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-const HTTP_URL = envUrl
-  ? envUrl
-  : isLocal
-    ? `${window.location.protocol}//${window.location.hostname}:8668`
-    : window.location.origin;
-const EMOJI_BASE_URL = `${HTTP_URL}/emojis`;
 const EMOJI_MAP: Record<string, string> = {
   'NEUTRAL': 'happy.jpeg',
   'HAPPY': 'happy.jpeg',

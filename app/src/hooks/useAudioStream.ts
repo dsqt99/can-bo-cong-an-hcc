@@ -1,12 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Message, AppState, WebSocketMessage, Emotion } from '../types';
 import { SettingsData } from '../components/Settings';
+import { WS_CHAT_URL } from '../config/api';
 
-const envUrl = import.meta.env.VITE_API_URL || '';
-const HTTP_URL = envUrl && !envUrl.includes('localhost') && !envUrl.includes('127.0.0.1')
-    ? envUrl
-    : `${window.location.protocol}//${window.location.hostname}:${envUrl.split(':').pop()?.replace(/[^0-9]/g, '') || '8668'}`;
-const WS_URL = HTTP_URL.replace('http://', 'ws://').replace('https://', 'wss://') + '/ws/chat';
 export const useAudioStream = (settings?: SettingsData) => {
     const [isConnected, setIsConnected] = useState(false);
     const [appState, setAppState] = useState<AppState>('idle');
@@ -66,7 +62,7 @@ export const useAudioStream = (settings?: SettingsData) => {
                 socketRef.current = null;
             }
 
-            const socket = new WebSocket(WS_URL);
+            const socket = new WebSocket(WS_CHAT_URL);
 
             socket.onopen = () => {
                 if (!isMounted) return;

@@ -1,3 +1,9 @@
+# Voice Bot AI - Docker Compose
+#
+# LOCAL DEV:    docker compose up --build
+# PUBLIC DOMAIN: Use with nginx reverse proxy (see nginx.conf.example)
+#                No need to set VITE_API_URL - auto-detection handles it
+
 services:
   backend:
     build:
@@ -9,14 +15,16 @@ services:
     env_file:
       - ./backend/.env
     restart: unless-stopped
+    networks:
+      - voice-bot-network
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        # Optional: set VITE_API_URL only when frontend and backend are on separate domains.
-        # Leave empty (default) when using a reverse proxy on the same domain.
+        # Leave empty for auto-detection (recommended for most cases)
+        # Only set for specific backend URL override
         - VITE_API_URL=${VITE_API_URL:-}
     container_name: voice-bot-frontend
     ports:
@@ -24,3 +32,10 @@ services:
     depends_on:
       - backend
     restart: unless-stopped
+    networks:
+      - voice-bot-network
+
+networks:
+  voice-bot-network:
+    driver: bridge
+
