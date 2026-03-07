@@ -6,6 +6,7 @@ import logging
 import sys
 import numpy as np
 import soundfile as sf
+from vietnormalizer import VietnameseNormalizer
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,7 @@ class TextToSpeechService:
         self.client = None  # Gradio Client
         self.default_ref_codes = None
         self.default_ref_text = None
-        self.normalizer = None
+        self.normalizer = VietnameseNormalizer()
         self.default_voice = "Ngọc (nữ miền Bắc)"  # changeable at runtime
 
         if tts_engine == "vieneu" or tts_engine == "viterbox":
