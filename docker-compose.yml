@@ -1,24 +1,29 @@
 # Voice Bot AI - Docker Compose
 #
 # LOCAL DEV:    docker compose up --build
-# PUBLIC DOMAIN: Use with nginx reverse proxy (see nginx.conf.example)
-#                No need to set VITE_API_URL - auto-detection handles it
 
 services:
-  backend:
+  backend-canboai:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: voice-bot-backend
+    container_name: backend-canboai
     ports:
       - "8668:8668"
     env_file:
-      - ./backend/.env
+      - .env
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8668/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
     networks:
-      - voice-bot-network
+      - canboai-network
+      - openwebui-network
 
-  frontend:
+  frontend-canboai:
     build:
       context: ./frontend
       dockerfile: Dockerfile
@@ -26,16 +31,21 @@ services:
         # Leave empty for auto-detection (recommended for most cases)
         # Only set for specific backend URL override
         - VITE_API_URL=${VITE_API_URL:-}
-    container_name: voice-bot-frontend
+    container_name: frontend-canboai
     ports:
       - "5173:5173"
     depends_on:
-      - backend
+      - backend-canboai
     restart: unless-stopped
     networks:
-      - voice-bot-network
+      - canboai-network
 
 networks:
-  voice-bot-network:
+  canboai-network:
     driver: bridge
+  openwebui-network:
+    name: openwebui_default
+    external: true
 
+volumes:
+  wlk-hf-cache:

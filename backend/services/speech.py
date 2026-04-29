@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import io
+import json
 import logging
 import sys
 import numpy as np
@@ -17,16 +18,56 @@ class TextToSpeechService:
         self.client = None  # Gradio Client
         self.default_ref_codes = None
         self.default_ref_text = None
-        self.normalizer = VietnameseNormalizer()
-        self.default_voice = "Ngọc (nữ miền Bắc)"  # changeable at runtime
+        self.normalizer = None #VietnameseNormalizer()
+        self.default_voice = "Ngoc"  # changeable at runtime
+        self.abbreviation_map = self._load_abbreviation_map()
 
-        if tts_engine == "vieneu" or tts_engine == "viterbox":
+        if tts_engine == "vieneu":
             # Try to initialize Gradio Client first (User Preference)
             self._init_gradio_client()
             # Fallback to local if client fails or not desired? 
             # User asked to update code for API, so we prioritize it.
             # Local init removed as per request
             pass
+
+    def _load_abbreviation_map(self):
+        """Load TTS abbreviation replacements from JSON file."""
+        default_map = {
+            "CCCD": "căn cước công dân",
+            "PCCC": "phòng cháy chữa cháy",
+        }
+        mapping_path = os.path.join(os.path.dirname(__file__), "tts_abbreviations.json")
+        try:
+            if not os.path.exists(mapping_path):
+                logger.warning(f"⚠️ Abbreviation file not found: {mapping_path}. Using default map")
+                return default_map
+            with open(mapping_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                logger.warning("⚠️ tts_abbreviations.json is not an object. Using default map")
+                return default_map
+            # Keep only string-string pairs
+            cleaned = {
+                str(k): str(v)
+                for k, v in data.items()
+                if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip()
+            }
+            if not cleaned:
+                logger.warning("⚠️ tts_abbreviations.json has no valid entries. Using default map")
+                return default_map
+            logger.info(f"✅ Loaded {len(cleaned)} TTS abbreviation replacements")
+            return cleaned
+        except Exception as e:
+            logger.error(f"❌ Failed to load tts_abbreviations.json: {e}. Using default map")
+            return default_map
+
+    def _normalize_for_tts(self, text: str) -> str:
+        normalized = text
+        # Use regex word boundaries so we don't accidentally replace inside longer words
+        for abbr, expanded in self.abbreviation_map.items():
+            pattern = rf"\b{re.escape(abbr)}\b"
+            normalized = re.sub(pattern, expanded, normalized)
+        return normalized
 
     def _init_gradio_client(self):
         try:
@@ -83,6 +124,13 @@ class TextToSpeechService:
             end_idx = text.find("]")
             clean_text = text[end_idx+1:].strip()
             
+        # Clean Markdown
+        for char in ['*', '_', '~', '#', '`']:
+            clean_text = clean_text.replace(char, '')
+        
+        # Normalize abbreviations for more natural TTS pronunciation
+        clean_text = self._normalize_for_tts(clean_text)
+        
         if not clean_text:
             return b""
             
@@ -112,9 +160,7 @@ class TextToSpeechService:
                             generation_mode="Standard (Một lần)",
                             use_batch=True,
                             max_batch_size_run=4,
-                            custom_voice_audio=None,     # No custom voice audio
-                            custom_voice_text="",        # No custom voice text
-                            temperature=1.0,
+                            temperature=0.7,
                             max_chars_chunk=256,
                             api_name="/synthesize_speech"
                         )

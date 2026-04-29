@@ -1,7 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { Message, AppState, WebSocketMessage, Emotion } from '../types';
+import { Message, AppState, WebSocketMessage, Emotion, SessionHistoryItem } from '../types';
 import { SettingsData } from '../components/Settings';
 import { WS_CHAT_URL } from '../config/api';
+
+const SESSION_HISTORY_KEY = 'voiceBotSessionHistoryV1';
+
+interface SessionArchive extends SessionHistoryItem {
+  messages: Message[];
+}
 
 export const useAudioStream = (settings?: SettingsData) => {
   const [isConnected, setIsConnected] = useState(false);
@@ -12,11 +18,13 @@ export const useAudioStream = (settings?: SettingsData) => {
   const [error, setError] = useState<string | null>(null);
   const [streamingAiText, setStreamingAiText] = useState<string>('');
   const [isAiProcessing, setIsAiProcessing] = useState(false);
+  const [isSttProcessing, setIsSttProcessing] = useState(false);
+  const [sessionId, setSessionId] = useState<string>('');
+  const [sessionHistory, setSessionHistory] = useState<SessionHistoryItem[]>([]);
 
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<number | null>(null);
   const reconnectAttemptRef = useRef(0);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioQueueRef = useRef<ArrayBuffer[]>([]);
   const isPlayingRef = useRef(false);
@@ -24,12 +32,13 @@ export const useAudioStream = (settings?: SettingsData) => {
   const mediaStreamRef = useRef<MediaStream | null>(null);
   const isConversationActiveRef = useRef(false);
 
+  // Track current playing audio source for barge-in interruption
+  const currentSourceNodeRef = useRef<AudioBufferSourceNode | null>(null);
+
   // Audio Analysis for Visualization
   const [inputAnalyser, setInputAnalyser] = useState<AnalyserNode | null>(null);
   const [outputAnalyser, setOutputAnalyser] = useState<AnalyserNode | null>(null);
   const handleWebSocketMessageRef = useRef<(data: WebSocketMessage) => void | Promise<void>>(() => { });
-  const lastVoiceActivityAtRef = useRef<number | null>(null);
-  const didAutoStopSegmentRef = useRef(false);
 
   // Audio storage for playback
   const currentAiAudioChunksRef = useRef<string[]>([]);
@@ -37,9 +46,101 @@ export const useAudioStream = (settings?: SettingsData) => {
 
   // Track connection state to avoid duplicate connects
   const isConnectingRef = useRef(false);
+
+  // Streaming audio refs (MediaRecorder for recording + AudioWorklet/ScriptProcessor for streaming)
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const workletNodeRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
+
+  // Silence detection refs
+  const lastVoiceActivityAtRef = useRef<number | null>(null);
+  const didAutoStopSegmentRef = useRef(false);
+  const firstVoiceDetectedRef = useRef(false);
+
+  const loadSessionArchives = (): SessionArchive[] => {
+    try {
+      const raw = localStorage.getItem(SESSION_HISTORY_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed.filter((x) => x && typeof x.id === 'string' && Array.isArray(x.messages));
+    } catch {
+      return [];
+    }
+  };
+
+  const persistSessionArchives = (archives: SessionArchive[]) => {
+    // Strip heavy audioData from messages before persisting to avoid QuotaExceededError
+    const stripped = archives.map((session) => ({
+      ...session,
+      messages: session.messages.map((msg) => ({
+        ...msg,
+        audioData: undefined, // Never persist audio blobs to localStorage
+      })),
+    }));
+
+    // Try to save, progressively trim if quota exceeded
+    const tryStore = (data: SessionArchive[]) => {
+      try {
+        localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(data));
+      } catch (e) {
+        if (data.length > 1) {
+          // Drop the oldest session and retry
+          tryStore(data.slice(0, data.length - 1));
+        } else {
+          // Cannot even store 1 session – clear and give up gracefully
+          try { localStorage.removeItem(SESSION_HISTORY_KEY); } catch (_) { /* ignore */ }
+          console.warn('localStorage quota exceeded – session history cleared');
+        }
+      }
+    };
+
+    tryStore(stripped);
+
+    setSessionHistory(
+      archives
+        .map(({ id, title, updatedAt, messageCount, lastPreview }) => ({ id, title, updatedAt, messageCount, lastPreview }))
+        .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    );
+  };
+
+  const makeSessionTitle = (sessionMessages: Message[]) => {
+    const firstUserMessage = sessionMessages.find((m) => m.type === 'user')?.text?.trim();
+    if (firstUserMessage) {
+      return firstUserMessage.length > 40 ? `${firstUserMessage.slice(0, 40)}…` : firstUserMessage;
+    }
+    return 'Phiên hội thoại';
+  };
+
+  const snapshotCurrentSessionToHistory = useCallback((sessionMessages: Message[]) => {
+    if (!sessionMessages.length) return;
+    const id = sessionId || `local-${Date.now()}`;
+    const now = new Date().toISOString();
+    const archive: SessionArchive = {
+      id,
+      title: makeSessionTitle(sessionMessages),
+      updatedAt: now,
+      messageCount: sessionMessages.length,
+      lastPreview: sessionMessages[sessionMessages.length - 1]?.text?.slice(0, 60) || '',
+      messages: sessionMessages,
+    };
+
+    const existing = loadSessionArchives();
+    const withoutCurrent = existing.filter((x) => x.id !== id);
+    persistSessionArchives([archive, ...withoutCurrent].slice(0, 20)); // cap at 20 sessions
+  }, [sessionId]);
+
   // Track appState in ref for use in callbacks
   const appStateRef = useRef<AppState>('idle');
   useEffect(() => { appStateRef.current = appState; }, [appState]);
+
+  useEffect(() => {
+    persistSessionArchives(loadSessionArchives());
+  }, []);
+
+  useEffect(() => {
+    if (!sessionId || messages.length === 0) return;
+    snapshotCurrentSessionToHistory(messages);
+  }, [messages, sessionId, snapshotCurrentSessionToHistory]);
 
   // --- WebSocket Connection ---
   useEffect(() => {
@@ -126,18 +227,26 @@ export const useAudioStream = (settings?: SettingsData) => {
       case 'recording_started':
         setAppState('listening');
         setTranscript('');
+        setIsSttProcessing(false);
         userRecordedAudioRef.current = [];
         break;
 
+      case 'session_init':
+        if (data.session_id) {
+          setSessionId(data.session_id);
+        }
+        break;
+
       case 'recording_stopped':
-        // Backend acknowledged stop - no action needed, FE already handled
         break;
 
       case 'transcript':
         if (data.text) {
           setTranscript(data.text);
+          setIsSttProcessing(true);
           if (data.isFinal) {
-            // Save user message with audio for playback
+            setIsSttProcessing(false);
+            // Save user message
             if (userRecordedAudioRef.current.length > 0) {
               const audioBlob = new Blob(userRecordedAudioRef.current, { type: 'audio/webm' });
               const reader = new FileReader();
@@ -157,7 +266,13 @@ export const useAudioStream = (settings?: SettingsData) => {
 
       case 'ai_processing':
         setIsAiProcessing(data.isProcessing ?? true);
-        setStreamingAiText('');
+        if (data.isProcessing) {
+          setStreamingAiText('');
+        }
+        break;
+
+      case 'stt_processing':
+        setIsSttProcessing(data.isProcessing ?? true);
         break;
 
       case 'ai_stream_chunk':
@@ -195,16 +310,30 @@ export const useAudioStream = (settings?: SettingsData) => {
         break;
 
       case 'user_speaking':
+        // Barge-in: immediately stop all audio playback
         audioQueueRef.current = [];
-        if (isPlayingRef.current) {
-          isPlayingRef.current = false;
+        if (currentSourceNodeRef.current) {
+          try {
+            currentSourceNodeRef.current.onended = null;
+            currentSourceNodeRef.current.stop();
+          } catch (_) { /* already stopped */ }
+          currentSourceNodeRef.current = null;
+        }
+        isPlayingRef.current = false;
+        setOutputAnalyser(null);
+        // Transition to listening if conversation is active
+        if (isConversationActiveRef.current) {
           setAppState('listening');
+        } else {
+          setAppState('idle');
         }
         break;
 
       case 'error':
       case 'stt_error':
         setError(data.message || 'Có lỗi xảy ra');
+        setIsSttProcessing(false);
+        setIsAiProcessing(false);
         setAppState('idle');
         break;
     }
@@ -250,23 +379,42 @@ export const useAudioStream = (settings?: SettingsData) => {
 
   const [isConversationActive, setIsConversationActive] = useState(false);
 
-  // --- Audio Recording (simplified: collect blob, send when done) ---
+  // --- Barge-in: interrupt AI playback ---
+  const interruptPlayback = () => {
+    audioQueueRef.current = [];
+    if (currentSourceNodeRef.current) {
+      try {
+        currentSourceNodeRef.current.onended = null;
+        currentSourceNodeRef.current.stop();
+      } catch (_) { /* already stopped */ }
+      currentSourceNodeRef.current = null;
+    }
+    isPlayingRef.current = false;
+    setOutputAnalyser(null);
+    currentAiAudioChunksRef.current = [];
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'user_speaking' }));
+    }
+  };
+
+  // --- Audio Recording with real-time streaming ---
   const startRecording = async () => {
     isConversationActiveRef.current = true;
     setIsConversationActive(true);
-    await _startMediaRecorder();
+    await _startStreamingRecording();
   };
 
-  const _startMediaRecorder = async () => {
+  const _startStreamingRecording = async () => {
     try {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-        return;
+      // If AI is currently speaking, interrupt it (barge-in)
+      if (appStateRef.current === 'speaking' || isPlayingRef.current) {
+        interruptPlayback();
       }
 
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       mediaStreamRef.current = stream;
 
-      // Setup Analyser for Microphone visualization
+      // Setup AudioContext
       if (!audioContextRef.current) {
         const AudioContextConstructor =
           window.AudioContext ??
@@ -280,52 +428,54 @@ export const useAudioStream = (settings?: SettingsData) => {
         await audioContextRef.current.resume();
       }
 
+      // Setup Analyser for Microphone visualization
       const source = audioContextRef.current.createMediaStreamSource(stream);
       const analyser = audioContextRef.current.createAnalyser();
       analyser.fftSize = 256;
       source.connect(analyser);
       setInputAnalyser(analyser);
-      lastVoiceActivityAtRef.current = performance.now();
-      didAutoStopSegmentRef.current = false;
 
-      // Collect all audio chunks locally
+      // Tell backend to start STT stream
+      if (socketRef.current?.readyState === WebSocket.OPEN) {
+        socketRef.current.send(JSON.stringify({ type: 'audio_stream_start' }));
+      }
+
+      // Use MediaRecorder to capture audio as webm chunks and stream to backend
       const chunks: Blob[] = [];
-
       const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
 
       mediaRecorder.ondataavailable = (event) => {
         if (event.data.size > 0) {
           chunks.push(event.data);
           userRecordedAudioRef.current.push(event.data);
+
+          // Stream the chunk to backend as binary
+          if (socketRef.current?.readyState === WebSocket.OPEN) {
+            event.data.arrayBuffer().then((buffer) => {
+              if (socketRef.current?.readyState === WebSocket.OPEN) {
+                socketRef.current.send(buffer);
+              }
+            });
+          }
         }
       };
 
-      // When recording stops, package the complete audio and send to backend
       mediaRecorder.onstop = () => {
-        if (chunks.length === 0) return;
-
-        const audioBlob = new Blob(chunks, { type: 'audio/webm' });
-        console.log(`📦 Audio recorded: ${audioBlob.size} bytes, ${chunks.length} chunks`);
-
-        // Convert to base64 and send to backend as a complete audio message
-        const reader = new FileReader();
-        reader.readAsDataURL(audioBlob);
-        reader.onloadend = () => {
-          const base64Audio = (reader.result as string).split(',')[1];
-          if (socketRef.current?.readyState === WebSocket.OPEN) {
-            socketRef.current.send(JSON.stringify({
-              type: 'audio_complete',
-              data: base64Audio,
-              mimeType: 'audio/webm'
-            }));
-          }
-        };
+        // Signal backend to stop STT stream
+        if (socketRef.current?.readyState === WebSocket.OPEN) {
+          socketRef.current.send(JSON.stringify({ type: 'audio_stream_stop' }));
+        }
       };
 
-      mediaRecorder.start(100); // Collect chunks every 100ms (for visualization)
+      mediaRecorder.start(100); // Send chunks every 100ms
       mediaRecorderRef.current = mediaRecorder;
 
-      // Set state to listening
+      // Reset silence detection refs
+      lastVoiceActivityAtRef.current = performance.now();
+      didAutoStopSegmentRef.current = false;
+      firstVoiceDetectedRef.current = false;
+
+      // Set state
       setAppState('listening');
       setTranscript('');
 
@@ -336,17 +486,43 @@ export const useAudioStream = (settings?: SettingsData) => {
     }
   };
 
-  // Client-side silence detection → auto-stop recording
+  const stopRecording = useCallback(() => {
+    isConversationActiveRef.current = false;
+    setIsConversationActive(false);
+    stopMediaRecorder();
+    setAppState('processing');
+  }, []);
+
+  const stopMediaRecorder = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      mediaRecorderRef.current.stop(); // This triggers onstop → sends audio_stream_stop
+    }
+    mediaRecorderRef.current = null;
+
+    if (workletNodeRef.current) {
+      try {
+        (workletNodeRef.current as any).disconnect?.();
+      } catch (_) { /* ignore */ }
+      workletNodeRef.current = null;
+    }
+
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+  };
+
+  // Client-side silence detection — auto-stop after SILENCE_MS of quiet
   useEffect(() => {
     if (appState !== 'listening' || !inputAnalyser || !isConversationActiveRef.current) return;
 
-    const SILENCE_MS = 1500;
-    const RMS_THRESHOLD = 0.01;
+    const SILENCE_MS = 1800;
+    const RMS_THRESHOLD = 0.015;
 
     const dataArray = new Uint8Array(inputAnalyser.fftSize);
     const intervalId = window.setInterval(() => {
       if (appStateRef.current !== 'listening') return;
-      if (mediaRecorderRef.current?.state !== 'recording') return;
+      if (!mediaRecorderRef.current || mediaRecorderRef.current.state !== 'recording') return;
 
       inputAnalyser.getByteTimeDomainData(dataArray);
       let sumSquares = 0;
@@ -360,6 +536,15 @@ export const useAudioStream = (settings?: SettingsData) => {
 
       if (rms > RMS_THRESHOLD) {
         lastVoiceActivityAtRef.current = now;
+        if (!firstVoiceDetectedRef.current) {
+          firstVoiceDetectedRef.current = true;
+        }
+        return;
+      }
+
+      // Don't trigger silence detection until user has spoken at least once
+      if (!firstVoiceDetectedRef.current) {
+        lastVoiceActivityAtRef.current = now;
         return;
       }
 
@@ -371,17 +556,9 @@ export const useAudioStream = (settings?: SettingsData) => {
 
       if (!didAutoStopSegmentRef.current && now - last >= SILENCE_MS) {
         didAutoStopSegmentRef.current = true;
+        console.log('🔇 Silence detected, auto-stopping recording for STT finalization');
         setAppState('processing');
-
-        // Stop recording → triggers onstop → sends complete audio to backend
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-          mediaRecorderRef.current.stop();
-        }
-
-        if (mediaStreamRef.current) {
-          mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-          mediaStreamRef.current = null;
-        }
+        stopMediaRecorder();
       }
     }, 100);
 
@@ -390,22 +567,6 @@ export const useAudioStream = (settings?: SettingsData) => {
     };
   }, [appState, inputAnalyser]);
 
-  const stopRecording = useCallback(() => {
-    isConversationActiveRef.current = false;
-    setIsConversationActive(false);
-    stopMediaRecorder();
-  }, []);
-
-  const stopMediaRecorder = () => {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop(); // This triggers onstop → sends audio
-    }
-
-    if (mediaStreamRef.current) {
-      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
-      mediaStreamRef.current = null;
-    }
-  };
 
   // --- Audio Playback Queue ---
   const queueAudio = (buffer: ArrayBuffer) => {
@@ -440,7 +601,7 @@ export const useAudioStream = (settings?: SettingsData) => {
 
       if (appStateRef.current === 'speaking') {
         if (isConversationActiveRef.current) {
-          _startMediaRecorder();
+          _startStreamingRecording();
         } else {
           setAppState('idle');
           setEmotion('NEUTRAL');
@@ -478,12 +639,16 @@ export const useAudioStream = (settings?: SettingsData) => {
       analyser.connect(audioContextRef.current.destination);
       setOutputAnalyser(analyser);
 
+      currentSourceNodeRef.current = source;
+
       source.onended = () => {
+        currentSourceNodeRef.current = null;
         playNextInQueue();
       };
       source.start(0);
     } catch (err) {
       console.error('Audio decode error:', err);
+      currentSourceNodeRef.current = null;
       playNextInQueue();
     }
   };
@@ -496,6 +661,32 @@ export const useAudioStream = (settings?: SettingsData) => {
         settings: newSettings
       }));
     }
+  }, []);
+
+  const clearCurrentSession = useCallback(async () => {
+    snapshotCurrentSessionToHistory(messages);
+    setMessages([]);
+    setTranscript('');
+    setStreamingAiText('');
+    setIsAiProcessing(false);
+    setIsSttProcessing(false);
+    setAppState('idle');
+
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'new_session' }));
+    }
+  }, [messages, snapshotCurrentSessionToHistory]);
+
+  const loadSessionFromHistory = useCallback((historyId: string) => {
+    const archives = loadSessionArchives();
+    const found = archives.find((x) => x.id === historyId);
+    if (!found) return;
+    setMessages(found.messages || []);
+    setTranscript('');
+    setStreamingAiText('');
+    setIsAiProcessing(false);
+    setIsSttProcessing(false);
+    setAppState('idle');
   }, []);
 
   return {
@@ -514,5 +705,10 @@ export const useAudioStream = (settings?: SettingsData) => {
     outputAnalyser,
     streamingAiText,
     isAiProcessing,
+    isSttProcessing,
+    sessionId,
+    sessionHistory,
+    clearCurrentSession,
+    loadSessionFromHistory,
   };
 };

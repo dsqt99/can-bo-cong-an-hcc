@@ -1,395 +1,259 @@
+"""
+Streaming Speech-to-Text service using WhisperLiveKit WebSocket.
+
+Connects to a WhisperLiveKit server (Docker container) at /asr endpoint.
+WLK provides:
+  - Streaming transcription (real-time partial + committed results)
+  - Built-in Silero VAD (voice activity detection)
+  - Automatic silence detection and segmentation
+
+Protocol:
+  Frontend → Backend: audio chunks (binary, webm or PCM)
+  Backend → WLK:      raw audio bytes via WebSocket /asr
+  WLK → Backend:      JSON messages with {lines, buffer_transcription, ...}
+  Backend → Frontend: {type: "transcript", text: "...", isFinal: bool}
+"""
+
 import asyncio
 import os
-import websockets
-import soundfile as sf
-import logging
-import io
-import numpy as np
-from typing import AsyncGenerator, Optional, Callable
 import json
+import logging
+from typing import Optional, Callable, Awaitable
+
+import websockets
 
 logger = logging.getLogger(__name__)
 
+
 class StreamSTTService:
     """
-    Streaming Speech-to-Text service using WebSocket connection
-    Connects to cahy-stt.anm05.com for real-time transcription
+    Streaming STT service backed by WhisperLiveKit.
+    
+    Each call to `stream_transcribe` opens a new WS connection to the WLK
+    server, streams audio chunks to it, and yields partial transcription 
+    results back to the caller.
     """
-    
+
     def __init__(
-        self, 
-        ws_url: str = None,
-        model: str = "large-v3",
-        lang: str = "vi",
-        chunk_size: int = 4096
+        self,
+        wlk_ws_url: str = None,
+        language: str = "vi",
     ):
-        """
-        Initialize Stream STT Service
-        
-        Args:
-            ws_url: WebSocket URL for STT service
-            model: Model to use (e.g., 'large-v3')
-            lang: Language code (e.g., 'vi' for Vietnamese)
-            chunk_size: Size of audio chunks to send (in samples)
-        """
-        self.ws_url = ws_url or os.getenv("STT_WS_URL", "wss://cahy-stt.anm05.com/stream")
-        self.model = model
-        self.lang = lang
-        self.chunk_size = chunk_size
-        self.websocket = None
-        
-    def get_connection_url(self) -> str:
-        """Build WebSocket connection URL with parameters"""
-        return f"{self.ws_url}?model={self.model}&lang={self.lang}"
-    
-    async def stream_audio_file(
-        self, 
-        audio_file_path: str,
-        on_result: Optional[Callable[[str], None]] = None
-    ) -> list[str]:
-        """
-        Stream audio from a file and get transcription results
-        
-        Args:
-            audio_file_path: Path to audio file (WAV format recommended)
-            on_result: Optional callback function to handle each result
-            
-        Returns:
-            List of transcription results
-        """
-        results = []
-        uri = self.get_connection_url()
-        
-        try:
-            async with websockets.connect(uri) as websocket:
-                logger.info(f"✅ Connected to STT WebSocket: {uri}")
-                
-                # Read audio file
-                data, samplerate = sf.read(audio_file_path, dtype='int16')
-                logger.info(f"📁 Loaded audio: {len(data)} samples at {samplerate}Hz")
-                
-                # Send audio in chunks
-                for i in range(0, len(data), self.chunk_size):
-                    chunk = data[i:i+self.chunk_size].tobytes()
-                    await websocket.send(chunk)
-                    
-                    # Try to receive response (non-blocking)
-                    try:
-                        result = await asyncio.wait_for(
-                            websocket.recv(), 
-                            timeout=0.01
-                        )
-                        logger.info(f"📝 Received: {result}")
-                        results.append(result)
-                        
-                        if on_result:
-                            on_result(result)
-                            
-                    except asyncio.TimeoutError:
-                        pass
-                
-                # Wait for final results
-                try:
-                    while True:
-                        result = await asyncio.wait_for(
-                            websocket.recv(), 
-                            timeout=1.0
-                        )
-                        logger.info(f"📝 Final result: {result}")
-                        results.append(result)
-                        
-                        if on_result:
-                            on_result(result)
-                            
-                except asyncio.TimeoutError:
-                    logger.info("⏱️ No more results, closing connection")
-                    
-        except Exception as e:
-            logger.error(f"❌ Error in stream_audio_file: {e}")
-            raise
-            
-        return results
-    
-    async def stream_audio_bytes(
+        self.wlk_ws_url = wlk_ws_url or os.getenv(
+            "WLK_WS_URL", "ws://localhost:8769/asr"
+        )
+        self.language = language or os.getenv("STT_LANG", "vi")
+        logger.info(f"🔧 StreamSTT init: WLK URL={self.wlk_ws_url}, lang={self.language}")
+
+    def _get_connection_url(self) -> str:
+        """Build the WLK WebSocket URL with language parameter."""
+        url = self.wlk_ws_url
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}language={self.language}"
+
+    async def stream_transcribe(
         self,
-        audio_data: bytes,
-        sample_rate: int = 16000,
-        on_result: Optional[Callable[[str], None]] = None
-    ) -> list[str]:
-        """
-        Stream audio from bytes and get transcription results
-        
-        Args:
-            audio_data: Audio data in bytes (WAV format)
-            sample_rate: Sample rate of audio
-            on_result: Optional callback function to handle each result
-            
-        Returns:
-            List of transcription results
-        """
-        results = []
-        uri = self.get_connection_url()
-        
-        try:
-            async with websockets.connect(uri) as websocket:
-                logger.info(f"✅ Connected to STT WebSocket: {uri}")
-                
-                # Convert bytes to numpy array
-                audio_io = io.BytesIO(audio_data)
-                data, sr = sf.read(audio_io, dtype='int16')
-                logger.info(f"📁 Loaded audio: {len(data)} samples at {sr}Hz")
-                
-                # Send audio in chunks
-                for i in range(0, len(data), self.chunk_size):
-                    chunk = data[i:i+self.chunk_size].tobytes()
-                    await websocket.send(chunk)
-                    
-                    # Try to receive response (non-blocking)
-                    try:
-                        result = await asyncio.wait_for(
-                            websocket.recv(), 
-                            timeout=0.01
-                        )
-                        logger.info(f"📝 Received: {result}")
-                        results.append(result)
-                        
-                        if on_result:
-                            on_result(result)
-                            
-                    except asyncio.TimeoutError:
-                        pass
-                
-                # Wait for final results
-                try:
-                    while True:
-                        result = await asyncio.wait_for(
-                            websocket.recv(), 
-                            timeout=1.0
-                        )
-                        logger.info(f"📝 Final result: {result}")
-                        results.append(result)
-                        
-                        if on_result:
-                            on_result(result)
-                            
-                except asyncio.TimeoutError:
-                    logger.info("⏱️ No more results, closing connection")
-                    
-        except Exception as e:
-            logger.error(f"❌ Error in stream_audio_bytes: {e}")
-            raise
-            
-        return results
-    
-    async def stream_audio_generator(
-        self,
-        audio_generator: AsyncGenerator[bytes, None],
-        on_result: Optional[Callable[[str], None]] = None
-    ) -> list[str]:
-        """
-        Stream audio from an async generator and get transcription results
-        Useful for real-time microphone input
-        
-        Args:
-            audio_generator: Async generator yielding audio chunks
-            on_result: Optional callback function to handle each result
-            
-        Returns:
-            List of transcription results
-        """
-        results = []
-        uri = self.get_connection_url()
-        send_done = asyncio.Event()
-        
-        try:
-            async with websockets.connect(uri) as websocket:
-                logger.info(f"✅ Connected to STT WebSocket: {uri}")
-                
-                async def send_audio():
-                    """Send audio chunks, then signal completion"""
-                    try:
-                        async for chunk in audio_generator:
-                            if chunk:
-                                try:
-                                    await websocket.send(chunk)
-                                except websockets.exceptions.ConnectionClosed:
-                                    logger.info("🔌 STT WebSocket closed during send")
-                                    break
-                    except Exception as e:
-                        logger.error(f"❌ Error sending audio: {e}")
-                    finally:
-                        send_done.set()
-                        logger.info("📤 Audio send complete, waiting for final results...")
-                
-                async def receive_results():
-                    """Receive results. After send is done, apply a timeout for remaining results."""
-                    try:
-                        while True:
-                            # If send is done, use a shorter timeout for remaining results
-                            if send_done.is_set():
-                                try:
-                                    result = await asyncio.wait_for(
-                                        websocket.recv(),
-                                        timeout=3.0  # Wait up to 3s for final results
-                                    )
-                                except asyncio.TimeoutError:
-                                    logger.info("⏱️ No more STT results after send completed")
-                                    break
-                            else:
-                                result = await websocket.recv()
-                            
-                            logger.info(f"📝 Received: {result}")
-                            results.append(result)
-                            
-                            if on_result:
-                                on_result(result)
-                                
-                    except websockets.exceptions.ConnectionClosed:
-                        logger.info("🔌 WebSocket connection closed")
-                    except Exception as e:
-                        logger.error(f"❌ Error receiving results: {e}")
-                
-                # Run send and receive concurrently
-                await asyncio.gather(
-                    send_audio(),
-                    receive_results()
-                )
-                    
-        except Exception as e:
-            logger.error(f"❌ Error in stream_audio_generator: {e}")
-            raise
-            
-        return results
-    
-    async def transcribe_realtime(
-        self,
-        audio_chunks: list[bytes],
-        on_partial_result: Optional[Callable[[str, bool], None]] = None
+        audio_queue: asyncio.Queue,
+        on_partial: Optional[Callable[[str, bool], Awaitable[None]]] = None,
+        timeout_after_done: float = 5.0,
     ) -> str:
         """
-        Transcribe audio chunks in real-time with partial results
-        
+        Stream audio chunks from an asyncio.Queue to WLK and collect results.
+
         Args:
-            audio_chunks: List of audio chunks (raw PCM int16 bytes)
-            on_partial_result: Callback(text, is_final) for partial/final results
-            
+            audio_queue: Queue of audio bytes. Put b"" or None to signal end.
+            on_partial:  async callback(text, is_final) for each update.
+            timeout_after_done: seconds to wait for final results after audio ends.
+
+        Returns:
+            The final combined transcription text.
+        """
+        uri = self._get_connection_url()
+        final_text = ""
+        send_done = asyncio.Event()
+
+        # Retry connection if WLK is still loading model
+        ws = None
+        max_retries = 10
+        for attempt in range(max_retries):
+            try:
+                ws = await websockets.connect(uri)
+                logger.info(f"✅ Connected to WLK STT: {uri}")
+                break
+            except (ConnectionRefusedError, OSError) as e:
+                if attempt < max_retries - 1:
+                    wait = 5
+                    logger.warning(f"⏳ WLK not ready (attempt {attempt+1}/{max_retries}), retrying in {wait}s...")
+                    await asyncio.sleep(wait)
+                else:
+                    logger.error(f"❌ WLK not reachable after {max_retries} attempts: {e}")
+                    raise
+
+        if ws is None:
+            raise ConnectionError("Could not connect to WLK STT")
+
+        try:
+            # Wait for config message from WLK server
+            try:
+                config_msg = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                config_data = json.loads(config_msg)
+                if config_data.get("type") == "config":
+                    logger.info(f"📋 WLK config: useAudioWorklet={config_data.get('useAudioWorklet')}")
+            except asyncio.TimeoutError:
+                logger.warning("⚠️ No config message from WLK, proceeding anyway")
+            except Exception as e:
+                logger.warning(f"⚠️ Error reading WLK config: {e}")
+
+            async def send_audio():
+                """Send audio chunks from queue to WLK."""
+                try:
+                    while True:
+                        chunk = await audio_queue.get()
+                        if chunk is None or chunk == b"":
+                            # Signal end of audio - send empty blob
+                            try:
+                                await ws.send(b"")
+                            except websockets.exceptions.ConnectionClosed:
+                                pass
+                            break
+                        try:
+                            await ws.send(chunk)
+                        except websockets.exceptions.ConnectionClosed:
+                            logger.info("🔌 WLK WebSocket closed during send")
+                            break
+                except Exception as e:
+                    logger.error(f"❌ Error sending audio to WLK: {e}")
+                finally:
+                    send_done.set()
+                    logger.info("📤 Audio send to WLK complete")
+
+            async def receive_results():
+                """Receive streaming transcription from WLK."""
+                nonlocal final_text
+                try:
+                    while True:
+                        if send_done.is_set():
+                            try:
+                                msg = await asyncio.wait_for(
+                                    ws.recv(),
+                                    timeout=timeout_after_done
+                                )
+                            except asyncio.TimeoutError:
+                                logger.info("⏱️ No more WLK results after audio done")
+                                break
+                        else:
+                            msg = await ws.recv()
+
+                        try:
+                            data = json.loads(msg)
+                        except json.JSONDecodeError:
+                            logger.warning(f"⚠️ Non-JSON from WLK: {msg[:100]}")
+                            continue
+
+                        msg_type = data.get("type", "")
+
+                        # Handle ready_to_stop signal
+                        if msg_type == "ready_to_stop":
+                            logger.info("✅ WLK ready_to_stop received")
+                            break
+
+                        # Handle config (shouldn't happen here but just in case)
+                        if msg_type == "config":
+                            continue
+
+                        # Extract text from WLK response
+                        text = self._extract_text(data)
+                        status = data.get("status", "active_transcription")
+
+                        if text:
+                            final_text = text
+                            is_final = send_done.is_set()
+
+                            if on_partial:
+                                await on_partial(text, is_final)
+
+                            logger.debug(f"📝 WLK transcript: {text[:80]}...")
+
+                        if status == "no_audio_detected":
+                            logger.info("🤫 WLK: no audio detected")
+
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info("🔌 WLK connection closed")
+                except Exception as e:
+                    logger.error(f"❌ Error receiving WLK results: {e}")
+
+            # Run send and receive concurrently
+            await asyncio.gather(send_audio(), receive_results())
+
+        except Exception as e:
+            logger.error(f"❌ Error in stream_transcribe: {e}")
+            raise
+        finally:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+
+        return final_text
+
+    def _extract_text(self, data: dict) -> str:
+        """
+        Extract combined transcription text from a WLK FrontData response.
+        
+        WLK sends:
+          - lines: [{speaker, text, start, end}, ...]  (committed text)
+          - buffer_transcription: "..."  (uncommitted/partial text)
+          - buffer_diarization: "..."  (text pending speaker assignment)
+        
+        We combine all into a single string.
+        """
+        parts = []
+
+        # Committed lines
+        lines = data.get("lines", [])
+        for line in lines:
+            text = line.get("text", "")
+            speaker = line.get("speaker", 1)
+            if text and speaker != -2:  # -2 = silence segment
+                parts.append(text.strip())
+
+        # Buffer (uncommitted transcription)
+        buffer_trans = data.get("buffer_transcription", "").strip()
+        if buffer_trans:
+            parts.append(buffer_trans)
+
+        buffer_diar = data.get("buffer_diarization", "").strip()
+        if buffer_diar:
+            parts.append(buffer_diar)
+
+        return " ".join(parts).strip()
+
+    async def transcribe_audio_bytes(
+        self,
+        audio_bytes: bytes,
+        on_partial: Optional[Callable[[str, bool], Awaitable[None]]] = None,
+        chunk_size: int = 8192,
+    ) -> str:
+        """
+        Convenience method: transcribe a complete audio buffer through WLK.
+
+        Args:
+            audio_bytes: Complete audio data (WebM, WAV, etc.)
+            on_partial: async callback(text, is_final)
+            chunk_size: Size of chunks to send
+
         Returns:
             Final transcription text
         """
-        uri = self.get_connection_url()
-        final_text = ""
-        
-        try:
-            async with websockets.connect(uri) as websocket:
-                logger.info(f"✅ Connected to STT WebSocket: {uri}")
-                
-                # Send all chunks
-                for chunk in audio_chunks:
-                    await websocket.send(chunk)
-                    
-                    # Try to get partial results
-                    try:
-                        result = await asyncio.wait_for(
-                            websocket.recv(),
-                            timeout=0.01
-                        )
-                        
-                        # Parse result if JSON
-                        try:
-                            result_data = json.loads(result)
-                            text = result_data.get("text", result)
-                            is_final = result_data.get("is_final", False)
-                        except:
-                            text = result
-                            is_final = False
-                        
-                        if on_partial_result:
-                            on_partial_result(text, is_final)
-                        
-                        if is_final:
-                            final_text = text
-                            
-                    except asyncio.TimeoutError:
-                        pass
-                
-                # Get final result
-                try:
-                    result = await asyncio.wait_for(
-                        websocket.recv(),
-                        timeout=2.0
-                    )
-                    
-                    try:
-                        result_data = json.loads(result)
-                        final_text = result_data.get("text", result)
-                    except:
-                        final_text = result
-                    
-                    if on_partial_result:
-                        on_partial_result(final_text, True)
-                        
-                except asyncio.TimeoutError:
-                    logger.warning("⏱️ Timeout waiting for final result")
-                    
-        except Exception as e:
-            logger.error(f"❌ Error in transcribe_realtime: {e}")
-            raise
-            
-        return final_text
+        queue = asyncio.Queue()
 
+        async def feed_audio():
+            for i in range(0, len(audio_bytes), chunk_size):
+                await queue.put(audio_bytes[i:i + chunk_size])
+            await queue.put(b"")  # Signal end
 
-# Example usage function
-async def example_usage():
-    """Example of how to use StreamSTTService"""
-    
-    # Initialize service
-    stt = StreamSTTService(
-        ws_url="wss://cahy-stt.anm05.com/stream",
-        model="large-v3",
-        lang="vi"
-    )
-    
-    # Example 1: Transcribe from file
-    def print_result(result):
-        print(f"Result: {result}")
-    
-    results = await stt.stream_audio_file(
-        "audio.wav",
-        on_result=print_result
-    )
-    
-    print(f"\nAll results: {results}")
-    
-    # Example 2: Transcribe from bytes
-    with open("audio.wav", "rb") as f:
-        audio_bytes = f.read()
-    
-    results = await stt.stream_audio_bytes(
-        audio_bytes,
-        on_result=print_result
-    )
-    
-    # Example 3: Real-time transcription with partial results
-    def handle_partial(text, is_final):
-        status = "FINAL" if is_final else "PARTIAL"
-        print(f"[{status}] {text}")
-    
-    # Simulate audio chunks
-    data, sr = sf.read("audio.wav", dtype='int16')
-    chunk_size = 4096
-    chunks = [
-        data[i:i+chunk_size].tobytes() 
-        for i in range(0, len(data), chunk_size)
-    ]
-    
-    final_text = await stt.transcribe_realtime(
-        chunks,
-        on_partial_result=handle_partial
-    )
-    
-    print(f"\nFinal transcription: {final_text}")
-
-
-if __name__ == "__main__":
-    # Run example
-    asyncio.run(example_usage())
+        # Start feeding and transcribing concurrently
+        feed_task = asyncio.create_task(feed_audio())
+        result = await self.stream_transcribe(queue, on_partial=on_partial)
+        await feed_task
+        return result

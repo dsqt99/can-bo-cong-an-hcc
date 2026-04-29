@@ -4,6 +4,7 @@ import json
 import base64
 import uuid
 import re
+import time
 from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -11,9 +12,12 @@ logger = logging.getLogger(__name__)
 
 class SessionManager:
     """
-    Session manager for voice chat:
-    - FE records audio with VAD (silence detection) → sends complete blob as base64
-    - BE decodes → STT (file-based) → AI → TTS → response
+    Session manager for voice chat with streaming STT via WhisperLiveKit.
+    
+    Two modes of audio input:
+    1. audio_stream: FE streams audio chunks in real-time → BE proxies to WLK → streaming transcription
+    2. audio_complete: FE sends complete audio blob → BE sends to WLK → transcription (legacy fallback)
+    3. chat_message: FE sends text directly → AI pipeline
     """
 
     def __init__(self, websocket, services: Dict[str, Any], settings: Dict[str, Any]):
@@ -22,13 +26,38 @@ class SessionManager:
         self.settings = settings.copy()
         self.session_id = str(uuid.uuid4())
 
-        # TTS stop signal
+        # TTS task management
         self.tts_stop_event = asyncio.Event()
+        self.tts_queue = asyncio.Queue(maxsize=5)
+        self.tts_worker_task = asyncio.create_task(self._tts_worker())
+
+        # Streaming STT state
+        self._stt_audio_queue: asyncio.Queue | None = None
+        self._stt_stream_task: asyncio.Task | None = None
+        self._last_stt_text = ""
 
         # WebSocket state
         self._ws_closed = False
 
         logger.info(f"✅ Session initialized: {self.session_id}")
+
+    async def _tts_worker(self):
+        """Sequential background worker for TTS to avoid blocking the AI stream"""
+        while not self._ws_closed:
+            try:
+                text = await self.tts_queue.get()
+                if text is None:  # Shutdown signal
+                    break
+                
+                if not self.tts_stop_event.is_set():
+                    await self._send_tts_execution(text)
+                
+                self.tts_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"TTS Worker Error: {e}")
+                await asyncio.sleep(0.1)
 
     # ── WebSocket helpers ──────────────────────────────────────────
 
@@ -51,12 +80,26 @@ class SessionManager:
         })
 
     async def cleanup(self):
+        self._ws_closed = True
         self.tts_stop_event.set()
+        
+        # Stop any active STT stream
+        await self._stop_stt_stream()
+        
+        if self.tts_worker_task:
+            self.tts_worker_task.cancel()
 
     # ── Message routing ────────────────────────────────────────────
 
     async def handle_message(self, message):
-        if "text" not in message:
+        if "text" not in message and "bytes" not in message:
+            return
+
+        # Handle binary audio chunks for streaming STT
+        if "bytes" in message:
+            audio_data = message["bytes"]
+            if self._stt_audio_queue is not None:
+                await self._stt_audio_queue.put(audio_data)
             return
 
         try:
@@ -71,14 +114,47 @@ class SessionManager:
                 if text:
                     await self._process_pipeline(text)
 
+            elif msg_type == "new_session":
+                self.session_id = str(uuid.uuid4())
+                await self._safe_send_json({
+                    "type": "session_init",
+                    "session_id": self.session_id
+                })
+                logger.info(f"🔄 Started new chat session: {self.session_id}")
+
+            elif msg_type == "audio_stream_start":
+                # FE starts streaming audio → open WLK connection
+                await self._start_stt_stream()
+
+            elif msg_type == "audio_stream_stop":
+                # FE stops streaming → signal end to WLK
+                await self._stop_stt_stream()
+
+            elif msg_type == "audio_chunk":
+                # FE sends base64-encoded audio chunk during stream
+                audio_b64 = data.get("data", "")
+                if audio_b64 and self._stt_audio_queue is not None:
+                    audio_bytes = base64.b64decode(audio_b64)
+                    await self._stt_audio_queue.put(audio_bytes)
+
             elif msg_type == "audio_complete":
+                # Legacy: FE sends complete audio blob
                 audio_b64 = data.get("data", "")
                 mime_type = data.get("mimeType", "audio/webm")
                 if audio_b64:
-                    await self._handle_audio(audio_b64, mime_type)
+                    await self._handle_audio_complete(audio_b64, mime_type)
 
             elif msg_type == "user_speaking":
+                # Clear TTS stop event and pending queue
                 self.tts_stop_event.set()
+                while not self.tts_queue.empty():
+                    try:
+                        self.tts_queue.get_nowait()
+                        self.tts_queue.task_done()
+                    except asyncio.QueueEmpty:
+                        break
+                # Echo back to FE so it can immediately clear audio queue/playback
+                await self._safe_send_json({"type": "user_speaking"})
 
         except json.JSONDecodeError:
             logger.error("Invalid JSON received")
@@ -86,40 +162,118 @@ class SessionManager:
     def _handle_update_settings(self, new_settings):
         self.settings.update(new_settings)
         ai = self.services["ai"]
-        stt = self.services["stt"]
         tts = self.services["tts"]
 
         if "systemPrompt" in new_settings:
             ai.update_prompt(new_settings["systemPrompt"])
 
-        if "aiModel" in new_settings:
-            ai.update_model(new_settings["aiModel"])
-
-        if "llmApiUrl" in new_settings and new_settings["llmApiUrl"]:
-            ai.base_url = new_settings["llmApiUrl"]
-            ai.update_model(ai.model)  # re-init client with new URL
-
-        if "llmApiKey" in new_settings and new_settings["llmApiKey"]:
-            ai.api_key = new_settings["llmApiKey"]
-            ai.update_model(ai.model)  # re-init client with new key
+        if any(k in new_settings for k in ["aiModel", "llmApiUrl", "llmApiKey"]):
+            model = new_settings.get("aiModel", getattr(ai, "model", "chatbot-cahy"))
+            url = new_settings.get("llmApiUrl")
+            key = new_settings.get("llmApiKey")
+            ai.update_all_configs(model=model, url=url, key=key)
 
         if "sttModel" in new_settings and new_settings["sttModel"]:
-            stt.model = new_settings["sttModel"]
-            logger.info(f"🎤 STT model updated: {stt.model}")
+            logger.info(f"🎤 STT model setting updated: {new_settings['sttModel']}")
 
         if "ttsVoice" in new_settings and new_settings["ttsVoice"]:
-            tts.default_voice = new_settings["ttsVoice"]
-            logger.info(f"🔊 TTS voice updated: {tts.default_voice}")
+            if hasattr(tts, "default_voice"):
+                tts.default_voice = new_settings["ttsVoice"]
+                logger.info(f"🔊 TTS voice updated: {tts.default_voice}")
+
+        if "elevenlabsVoiceId" in new_settings:
+            el_tts = self.services.get("elevenlabs_tts")
+            if el_tts and hasattr(el_tts, "update_voice"):
+                el_tts.update_voice(new_settings["elevenlabsVoiceId"])
+                logger.info(f"🔊 ElevenLabs voice ID → {new_settings['elevenlabsVoiceId']}")
 
         logger.info("⚙️ Settings updated")
 
-    # ── Audio → STT → AI → TTS pipeline ───────────────────────────
+    # ── Streaming STT (ElevenLabs) ─────────────────────────────
 
-    async def _handle_audio(self, audio_b64: str, mime_type: str):
-        """Decode base64 audio → STT → AI → TTS"""
-        logger.info(f"🎤 Received audio ({len(audio_b64)} chars b64)")
+    async def _start_stt_stream(self):
+        """Start streaming STT session with ElevenLabs."""
+        logger.info("🎙️ _start_stt_stream begin")
+        # Stop any existing stream first
+        await self._stop_stt_stream()
 
-        # 1. Decode base64
+        self._last_stt_text = ""
+        self._stt_audio_queue = asyncio.Queue()
+        
+        await self._safe_send_json({"type": "stt_processing", "isProcessing": True})
+
+        async def run_stt_stream():
+            try:
+                stream_stt = self.services["stream_stt"]
+                
+                async def on_partial(text: str, is_final: bool):
+                    self._last_stt_text = text
+                    await self._safe_send_json({
+                        "type": "transcript",
+                        "text": text,
+                        "isFinal": False
+                    })
+
+                final_text = await stream_stt.stream_transcribe(
+                    self._stt_audio_queue,
+                    on_partial=on_partial,
+                )
+
+                # Use final_text or last known text
+                transcript = final_text or self._last_stt_text
+
+                await self._safe_send_json({"type": "stt_processing", "isProcessing": False})
+
+                if not transcript:
+                    logger.warning("⚠️ Empty transcript from WLK stream")
+                    await self._safe_send_json({
+                        "type": "transcript",
+                        "text": "(Không nhận diện được giọng nói)",
+                        "isFinal": True
+                    })
+                    return
+
+                logger.info(f"📝 Stream transcript: {transcript}")
+
+                # Send final transcript
+                await self._safe_send_json({
+                    "type": "transcript",
+                    "text": transcript,
+                    "isFinal": True
+                })
+
+                # Run AI pipeline
+                await self._process_pipeline(transcript)
+
+            except Exception as e:
+                logger.error(f"❌ STT stream error: {e}")
+                await self._safe_send_json({"type": "stt_processing", "isProcessing": False})
+                await self._safe_send_json({"type": "stt_error", "message": str(e)})
+
+        self._stt_stream_task = asyncio.create_task(run_stt_stream())
+
+    async def _stop_stt_stream(self):
+        """Signal end of audio stream and wait for STT to finish."""
+        if self._stt_audio_queue is not None:
+            await self._stt_audio_queue.put(b"")  # Signal end
+            self._stt_audio_queue = None
+
+        if self._stt_stream_task is not None:
+            try:
+                await asyncio.wait_for(self._stt_stream_task, timeout=60.0)
+            except asyncio.TimeoutError:
+                logger.warning("⏱️ STT stream task timed out, cancelling")
+                self._stt_stream_task.cancel()
+            except Exception as e:
+                logger.error(f"❌ Error stopping STT stream: {e}")
+            self._stt_stream_task = None
+
+    # ── Legacy: Complete audio blob → STT ──────────────────────────
+
+    async def _handle_audio_complete(self, audio_b64: str, mime_type: str):
+        """Legacy path: decode base64 audio → WLK STT → AI → TTS"""
+        logger.info(f"🎤 Received complete audio ({len(audio_b64)} chars b64)")
+
         try:
             audio_bytes = base64.b64decode(audio_b64)
         except Exception as e:
@@ -129,16 +283,28 @@ class SessionManager:
 
         logger.info(f"📦 Audio: {len(audio_bytes)} bytes ({mime_type})")
 
-        # 2. STT
-        await self._safe_send_json({"type": "ai_processing", "isProcessing": True})
+        await self._safe_send_json({"type": "stt_processing", "isProcessing": True})
 
         try:
-            stt = self.services["stt"]
-            transcript = await stt.transcribe(audio_bytes, mime_type)
+            stream_stt = self.services["stream_stt"]
+
+            async def on_partial(text: str, is_final: bool):
+                await self._safe_send_json({
+                    "type": "transcript",
+                    "text": text,
+                    "isFinal": False
+                })
+
+            transcript = await stream_stt.transcribe_audio_bytes(
+                audio_bytes, on_partial=on_partial
+            )
         except Exception as e:
             logger.error(f"❌ STT error: {e}")
+            await self._safe_send_json({"type": "stt_processing", "isProcessing": False})
             await self._safe_send_json({"type": "stt_error", "message": str(e)})
             return
+        finally:
+            await self._safe_send_json({"type": "stt_processing", "isProcessing": False})
 
         if not transcript:
             logger.warning("⚠️ Empty transcript")
@@ -147,28 +313,107 @@ class SessionManager:
                 "text": "(Không nhận diện được giọng nói)",
                 "isFinal": True
             })
-            await self._safe_send_json({"type": "ai_processing", "isProcessing": False})
             return
 
         logger.info(f"📝 Transcript: {transcript}")
 
-        # 3. Send transcript to FE
         await self._safe_send_json({
             "type": "transcript",
             "text": transcript,
             "isFinal": True
         })
 
-        # 4. AI → TTS
         await self._process_pipeline(transcript)
 
     # ── AI + TTS ───────────────────────────────────────────────────
 
     async def _process_pipeline(self, input_text: str):
-        """Run AI streaming + sentence-level TTS"""
+        """Run RAG Agent streaming + sentence-level TTS"""
+        t_pipeline_start = time.time()
+        logger.info(f"🤖 RAG pipeline begin: {input_text[:100]}")
         self.tts_stop_event.clear()
+
+        # Clear queue for new response
+        while not self.tts_queue.empty():
+            try:
+                self.tts_queue.get_nowait()
+                self.tts_queue.task_done()
+            except: break
+
         await self._safe_send_json({"type": "ai_processing", "isProcessing": True})
 
+        rag_agent = self.services.get("rag_agent")
+        if not rag_agent:
+            # Fallback if RAG agent not available
+            logger.warning("RAG agent not available, falling back to legacy AI service")
+            return await self._legacy_process_pipeline(input_text, t_pipeline_start)
+
+        full_response = ""
+        emotion = "NEUTRAL"
+        sentence_buffer = ""
+        clean_so_far = ""
+
+        try:
+            # Setup the stream chunk callback
+            async def on_chunk(chunk: str):
+                nonlocal sentence_buffer, clean_so_far, full_response
+                full_response += chunk
+
+                if self.tts_stop_event.is_set():
+                    return
+
+                # Stream cleaned text to FE
+                display = re.sub(r'\[.*?\]', '', full_response).lstrip()
+                if display and display != clean_so_far:
+                    clean_so_far = display
+                    await self._safe_send_json({
+                        "type": "ai_stream_chunk",
+                        "text": clean_so_far
+                    })
+
+                # Sentence splitting for TTS - Queue sentences
+                sentence_buffer += chunk
+                sentences = re.split(r'(?<=[.!?\n:;])\s+', sentence_buffer)
+                if len(sentences) > 1:
+                    for s in sentences[:-1]:
+                        if s.strip():
+                            await self.tts_queue.put(s)
+                    sentence_buffer = sentences[-1]
+
+            # Execute RAG workflow
+            chat_history = await rag_agent.get_session_history(self.session_id)
+            result = await rag_agent.process_stream(
+                user_message=input_text,
+                session_id=self.session_id,
+                chat_history=chat_history,
+                on_chunk=on_chunk
+            )
+
+            emotion = result["emotion"]
+            final_text = result["final_response"]
+
+            # Flush remaining buffer to queue
+            if sentence_buffer.strip() and not self.tts_stop_event.is_set():
+                await self.tts_queue.put(sentence_buffer)
+
+        except Exception as e:
+            logger.error(f"❌ RAG pipeline error: {e}")
+            final_text = "I'm sorry, I'm having trouble processing your request."
+        finally:
+            t_pipeline = time.time() - t_pipeline_start
+            logger.info(f"⏱️ RAG pipeline done: {t_pipeline:.2f}s")
+            await self._safe_send_json({"type": "ai_processing", "isProcessing": False})
+
+        # Final AI response
+        if final_text:
+            await self._safe_send_json({
+                "type": "ai_response",
+                "text": final_text,
+                "emotion": emotion
+            })
+
+    async def _legacy_process_pipeline(self, input_text: str, t_pipeline_start: float):
+        """Legacy AI processing pipeline for fallback"""
         ai = self.services["ai"]
         full_response = ""
         emotion = "NEUTRAL"
@@ -189,7 +434,7 @@ class SessionManager:
                         emotion = tag.group(1)
 
                 # Stream cleaned text to FE
-                display = re.sub(r'\[.*?\]', '', full_response).strip()
+                display = re.sub(r'\[.*?\]', '', full_response).lstrip()
                 if display and display != clean_so_far:
                     clean_so_far = display
                     await self._safe_send_json({
@@ -197,21 +442,25 @@ class SessionManager:
                         "text": clean_so_far
                     })
 
-                # Sentence splitting for TTS
+                # Sentence splitting for TTS - Queue sentences instead of awaiting
                 sentence_buffer += chunk
-                sentences = re.split(r'(?<=[.!?])\s+', sentence_buffer)
+                sentences = re.split(r'(?<=[.!?,\n:;])\s+', sentence_buffer)
                 if len(sentences) > 1:
                     for s in sentences[:-1]:
                         if s.strip():
-                            await self._send_tts(s)
+                            await self.tts_queue.put(s)
                     sentence_buffer = sentences[-1]
 
-            # Flush remaining buffer
+            # Flush remaining buffer to queue
             if sentence_buffer.strip() and not self.tts_stop_event.is_set():
-                await self._send_tts(sentence_buffer)
+                await self.tts_queue.put(sentence_buffer)
 
         except Exception as e:
             logger.error(f"❌ AI/TTS pipeline error: {e}")
+        finally:
+            t_pipeline = time.time() - t_pipeline_start
+            logger.info(f"⏱️ legacy _process_pipeline done: {t_pipeline:.2f}s")
+            await self._safe_send_json({"type": "ai_processing", "isProcessing": False})
 
         # Final AI response
         final_text = re.sub(r'\[.*?\]', '', full_response).strip()
@@ -222,11 +471,8 @@ class SessionManager:
                 "emotion": emotion
             })
 
-    async def _send_tts(self, text: str):
-        """Generate TTS for a sentence and send audio to FE"""
-        if self.tts_stop_event.is_set():
-            return
-
+    async def _send_tts_execution(self, text: str):
+        """Actually generate TTS and send audio to FE (called by background worker)"""
         clean = re.sub(r'\[.*?\]', '', text).strip()
         if not clean:
             return
@@ -243,4 +489,4 @@ class SessionManager:
                     "data": base64.b64encode(audio).decode("utf-8")
                 })
         except Exception as e:
-            logger.error(f"TTS error: {e}")
+            logger.error(f"TTS execution error: {e}")

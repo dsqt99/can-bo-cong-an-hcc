@@ -13,9 +13,10 @@ from fastapi.responses import Response
 from typing import Optional
 
 # Services
-from services.speech import TextToSpeechService
 from services.ai import LLMAgent
-from services.stt import STTService
+from services.rag_agent import StreamingRAGAgent
+from services.elevenlabs_speech import ElevenLabsTTSService
+from services.elevenlabs_stt import ElevenLabsSTTService
 
 # Session Manager
 from session_manager import SessionManager
@@ -62,17 +63,33 @@ default_settings = {
 
 # Initialize Services
 ai_agent = LLMAgent()
-stt_service = STTService(model="large-v3", lang="vi")
-tts_service = TextToSpeechService(tts_engine="vieneu")
+rag_agent = StreamingRAGAgent()
+
+# ElevenLabs only
+elevenlabs_stt_service = ElevenLabsSTTService()
+elevenlabs_tts_service = ElevenLabsTTSService()
+
+logger.info(f"🔊 TTS Provider: ElevenLabs → {elevenlabs_tts_service.__class__.__name__}")
+logger.info(f"🎤 STT Provider: ElevenLabs → {elevenlabs_stt_service.__class__.__name__}")
 
 class TTSRequest(BaseModel):
     text: str
     audioPrompt: Optional[str] = None
     language: Optional[str] = None
 
+from services.db import db_manager
+
+@app.on_event("startup")
+async def startup_event():
+    await db_manager.init_db()
+
 @app.get("/")
 async def root():
     return {"message": "Voice Bot AI Backend Running"}
+
+@app.get("/api/health")
+async def health_check():
+    return {"status": "ok"}
 
 @app.post("/api/clear-session/{session_id}")
 async def clear_session(session_id: str):
@@ -97,11 +114,10 @@ async def text_to_speech(request: TTSRequest):
     try:
         if not request.text:
             return Response(status_code=400)
-            
+
         logger.info(f"🔊 generating audio for: {request.text[:50]}...")
-        audio_content = await tts_service.synthesize(
+        audio_content = await elevenlabs_tts_service.synthesize(
             request.text,
-            audio_prompt=request.audioPrompt,
             language=request.language or "vi",
         )
         return Response(content=audio_content, media_type="audio/wav")
@@ -109,15 +125,46 @@ async def text_to_speech(request: TTSRequest):
         logger.error(f"TTS Error: {e}")
         return Response(status_code=500)
 
+@app.post("/api/knowledge/search")
+async def search_knowledge(query: str, top_k: int = 5):
+    """Search knowledge base directly using RAG API"""
+    try:
+        from services.rag.retriever import get_retriever
+        retriever = get_retriever()
+        kb_id = os.getenv("RAG_KNOWLEDGE_BASE_ID", "")
+
+        results = await retriever.search(
+            query=query,
+            collection_ids=[kb_id] if kb_id else None,
+            top_k=top_k
+        )
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Error searching knowledge: {e}")
+        return {"error": str(e), "results": []}
+
+@app.get("/api/rag/status")
+async def rag_status():
+    """Check RAG configuration status"""
+    return {
+        "enabled": os.getenv("RAG_ENABLED", "true").lower() == "true",
+        "knowledge_base_id": os.getenv("RAG_KNOWLEDGE_BASE_ID", ""),
+        "model": os.getenv("LLM_MODEL", "chatbot-cahy"),
+        "last_messages": os.getenv("LAST_MESSAGES", "20")
+    }
+
 @app.websocket("/ws/chat")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     
-    # Bundle services for the session (no VAD needed)
+    # Bundle services for the session
     services = {
         "ai": ai_agent,
-        "stt": stt_service,
-        "tts": tts_service,
+        "rag_agent": rag_agent,
+        "stream_stt": elevenlabs_stt_service,
+        "tts": elevenlabs_tts_service,
+        "elevenlabs_stt": elevenlabs_stt_service,
+        "elevenlabs_tts": elevenlabs_tts_service,
     }
     
     session = SessionManager(websocket, services, default_settings)

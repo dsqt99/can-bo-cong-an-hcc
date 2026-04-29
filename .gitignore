@@ -10,3 +10,9 @@ docs
 .gitattributes
 ERRORS.md
 GEMINI.md
+*.pyc
+*.mp3
+*.wav
+.vscode/
+.agents
+.claude

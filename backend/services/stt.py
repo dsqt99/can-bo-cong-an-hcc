@@ -3,6 +3,7 @@ import os
 import io
 import logging
 import json
+import inspect
 import subprocess
 import tempfile
 import shutil
@@ -37,25 +38,38 @@ class STTService:
     def __init__(
         self,
         ws_url: Optional[str] = None,
-        model: str = "large-v3",
-        lang: str = "vi",
+        model: Optional[str] = None,
+        lang: Optional[str] = None,
     ):
         self.ws_url = ws_url or os.getenv("STT_WS_URL", "wss://cahy-stt.anm05.com/stream")
-        self.model = model
-        self.lang = lang
+        self.model = model or os.getenv("STT_MODEL", "large-v3")
+        self.lang = lang or os.getenv("STT_LANG", "vi")
+        self.api_bearer_token = os.getenv("API_BEARER_TOKEN", os.getenv("STT_API_BEARER_TOKEN", "")).strip()
         logger.info(f"🔧 STT init: ffmpeg={'✅ ' + str(FFMPEG_EXE) if HAS_FFMPEG else '❌ NOT FOUND'}")
 
     def _get_ws_url(self) -> str:
         return f"{self.ws_url}?model={self.model}&lang={self.lang}"
 
-    async def transcribe(self, audio_bytes: bytes, mime_type: str = "audio/webm") -> str:
+    def _get_ws_connect_kwargs(self) -> dict:
+        """Build websocket.connect kwargs with optional Bearer auth header."""
+        if not self.api_bearer_token:
+            return {}
+
+        headers = {
+            "Authorization": f"Bearer {self.api_bearer_token}"
+        }
+        # websockets 16+ only supports additional_headers
+        return {"additional_headers": headers}
+
+    async def transcribe(self, audio_bytes: bytes, mime_type: str = "audio/webm", on_partial_result = None) -> str:
         """
         Transcribe audio bytes to text.
 
         Args:
             audio_bytes: Raw audio data (WebM, WAV, etc.)
             mime_type: MIME type of the audio
-
+            on_partial_result: Callback for partial transcription results
+            
         Returns:
             Transcription text (empty string if nothing detected)
         """
@@ -69,7 +83,7 @@ class STTService:
             return ""
 
         # Send PCM to STT websocket
-        return await self._stt_websocket(pcm_bytes)
+        return await self._stt_websocket(pcm_bytes, on_partial_result)
 
     async def _to_pcm(self, audio_bytes: bytes, mime_type: str) -> Optional[bytes]:
         """Convert any audio format to raw PCM int16 mono 16kHz"""
@@ -154,14 +168,15 @@ class STTService:
                 except Exception:
                     pass
 
-    async def _stt_websocket(self, pcm_bytes: bytes) -> str:
+    async def _stt_websocket(self, pcm_bytes: bytes, on_partial_result = None) -> str:
         """Send PCM audio to STT WebSocket and get transcript"""
         uri = self._get_ws_url()
         results = []
         CHUNK_SIZE = 8192  # Send in 8KB chunks
 
         try:
-            async with websockets.connect(uri) as ws:
+            connect_kwargs = self._get_ws_connect_kwargs()
+            async with websockets.connect(uri, **connect_kwargs) as ws:
                 logger.info(f"✅ Connected to STT: {uri}")
 
                 # Send PCM in chunks
@@ -169,23 +184,36 @@ class STTService:
                     chunk = pcm_bytes[i:i + CHUNK_SIZE]
                     await ws.send(chunk)
 
-                    # Non-blocking receive for partial results
-                    try:
-                        result = await asyncio.wait_for(ws.recv(), timeout=0.01)
-                        results.append(result)
-                    except asyncio.TimeoutError:
-                        pass
-
                 logger.info(f"📤 Sent {len(pcm_bytes)} bytes PCM, waiting for results...")
 
                 # Wait for final results
+                # Give it up to 5 seconds total for final transcript
+                start_wait = asyncio.get_event_loop().time()
                 try:
                     while True:
-                        result = await asyncio.wait_for(ws.recv(), timeout=3.0)
+                        timeout_left = 5.0 - (asyncio.get_event_loop().time() - start_wait)
+                        if timeout_left <= 0:
+                            logger.info("⏱️ Reached 5.0s wait limit")
+                            break
+                            
+                        result = await asyncio.wait_for(ws.recv(), timeout=timeout_left)
                         results.append(result)
                         logger.info(f"📝 STT result: {result}")
+                        
+                        if on_partial_result:
+                            partial_text = self._parse_results([result])
+                            if partial_text:
+                                if asyncio.iscoroutinefunction(on_partial_result):
+                                    await on_partial_result(partial_text)
+                                else:
+                                    on_partial_result(partial_text)
+                        
                 except asyncio.TimeoutError:
-                    pass
+                    # Timeout reached
+                    logger.info("⏱️ STT result wait timed out after 5s")
+                except websockets.exceptions.ConnectionClosed:
+                    logger.info("🔌 STT WebSocket closed by server")
+
 
         except Exception as e:
             logger.error(f"❌ STT WebSocket error: {e}")

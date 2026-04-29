@@ -1,8 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Message, AppState } from '../types';
-import { User, Send, Volume2, VolumeX, Loader2, ShieldCheck, MessageCircle, PanelRightClose } from 'lucide-react';
+import { Message, AppState, SessionHistoryItem } from '../types';
+import { User, Send, Volume2, VolumeX, Loader2, ShieldCheck, MessageCircle, PanelRightClose, MessageSquarePlus, History } from 'lucide-react';
 import { TTS_API_URL } from '../config/api';
 
 interface MessageListProps {
@@ -15,6 +15,11 @@ interface MessageListProps {
   appState: AppState;
   streamingAiText: string;
   isAiProcessing: boolean;
+  isSttProcessing: boolean;
+  sessionHistory: SessionHistoryItem[];
+  onClearSession: () => void;
+  onLoadSession: (id: string) => void;
+  currentSessionId?: string;
   onToggleChat?: () => void;
 }
 
@@ -28,6 +33,11 @@ export const MessageList: React.FC<MessageListProps> = ({
   appState,
   streamingAiText,
   isAiProcessing,
+  isSttProcessing,
+  sessionHistory,
+  onClearSession,
+  onLoadSession,
+  currentSessionId,
   onToggleChat,
 }) => {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -36,6 +46,7 @@ export const MessageList: React.FC<MessageListProps> = ({
   const [playingMessageId, setPlayingMessageId] = useState<string | null>(null);
   const [loadingMessageId, setLoadingMessageId] = useState<string | null>(null);
   const [audioCache, setAudioCache] = useState<Record<string, string>>({});
+  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const currentSourceRef = useRef<AudioBufferSourceNode | null>(null);
@@ -182,11 +193,11 @@ export const MessageList: React.FC<MessageListProps> = ({
 
   return (
     <section
-      className="flex h-full w-full flex-col bg-gradient-to-b from-slate-50 to-white border-l border-slate-200/80"
+      className="flex h-full w-full flex-col bg-white border-l border-black/5"
       aria-label="Khu vực hội thoại"
     >
       {/* Header */}
-      <header className="flex-shrink-0 flex items-center justify-between border-b border-police-green/10 bg-white/90 backdrop-blur-sm px-4 sm:px-6 h-[52px] sm:h-[60px] shadow-sm">
+      <header className="flex-shrink-0 flex items-center justify-between border-b border-black/5 bg-white/70 backdrop-blur-xl px-4 sm:px-6 h-[52px] sm:h-[60px] z-10">
         <div className="flex items-center gap-2.5 sm:gap-3">
           <div className="w-2.5 h-2.5 sm:w-3 sm:h-3 rounded-full shadow-sm bg-police-green animate-pulse" aria-hidden="true" />
           <h2 className="text-xs sm:text-sm font-bold uppercase tracking-wider text-police-green">
@@ -194,17 +205,65 @@ export const MessageList: React.FC<MessageListProps> = ({
           </h2>
         </div>
 
-        {onToggleChat && (
+        <div className="flex items-center gap-1.5">
           <button
-            onClick={onToggleChat}
+            onClick={() => setShowHistoryPanel((v) => !v)}
             className="p-1.5 text-slate-400 hover:text-police-green hover:bg-police-green/10 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-police-green/50 cursor-pointer"
-            aria-label="Ẩn hội thoại"
-            title="Ẩn hội thoại"
+            aria-label="Xem lịch sử phiên chat"
+            title="Lịch sử phiên chat"
           >
-            <PanelRightClose className="h-5 w-5" aria-hidden="true" />
+            <History className="h-5 w-5" aria-hidden="true" />
           </button>
-        )}
+          <button
+            onClick={onClearSession}
+            className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-300 cursor-pointer"
+            aria-label="Tạo cuộc hội thoại mới"
+            title="Tạo cuộc hội thoại mới"
+          >
+            <MessageSquarePlus className="h-5 w-5" aria-hidden="true" />
+          </button>
+          {onToggleChat && (
+            <button
+              onClick={onToggleChat}
+              className="p-1.5 text-slate-400 hover:text-police-green hover:bg-police-green/10 rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-police-green/50 cursor-pointer"
+              aria-label="Ẩn hội thoại"
+              title="Ẩn hội thoại"
+            >
+              <PanelRightClose className="h-5 w-5" aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </header>
+
+      {showHistoryPanel && (
+        <div className="border-b border-black/5 bg-white px-4 sm:px-6 py-3 max-h-48 overflow-y-auto">
+          {sessionHistory.length === 0 ? (
+            <p className="text-xs text-slate-500">Chưa có lịch sử phiên chat.</p>
+          ) : (
+            <div className="space-y-2">
+              {sessionHistory.map((session) => (
+                <button
+                  key={session.id}
+                  onClick={() => {
+                    onLoadSession(session.id);
+                    setShowHistoryPanel(false);
+                  }}
+                  className={`w-full text-left rounded-xl border px-3 py-2 transition-colors cursor-pointer ${session.id === currentSessionId
+                      ? 'border-police-green/40 bg-police-green/5'
+                      : 'border-slate-200 hover:bg-slate-50'
+                    }`}
+                >
+                  <div className="text-xs font-semibold text-slate-800 truncate">{session.title}</div>
+                  <div className="text-[11px] text-slate-500 truncate">{session.lastPreview || 'Không có nội dung'}</div>
+                  <div className="text-[10px] text-slate-400 mt-1">
+                    {new Date(session.updatedAt).toLocaleString('vi-VN')} • {session.messageCount} tin nhắn
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Messages Container */}
       <div
@@ -215,15 +274,17 @@ export const MessageList: React.FC<MessageListProps> = ({
         aria-label="Lịch sử tin nhắn"
       >
         {/* Empty State */}
-        {messages.length === 0 && !shouldShowTranscript && !streamingAiText && !isAiProcessing && (
-          <div className="flex h-full flex-col items-center justify-center text-slate-500 py-8">
-            <div className="mb-5 sm:mb-6 rounded-full bg-gradient-to-br from-slate-50 to-white p-5 sm:p-6 shadow-lg border-2 border-police-green/15 transition-transform duration-300 hover:scale-105">
-              <ShieldCheck className="h-12 w-12 sm:h-16 sm:w-16 text-police-green" aria-hidden="true" />
+        {messages.length === 0 && !shouldShowTranscript && !streamingAiText && !isAiProcessing && !isSttProcessing && (
+          <div className="flex h-full flex-col items-center justify-center text-slate-500 py-8 animate-fade-in">
+            <div className="mb-6 sm:mb-8 rounded-[2rem] bg-slate-50 p-6 sm:p-8 border border-black/5 shadow-[0_8px_32px_rgba(0,0,0,0.03)] transition-transform duration-500 hover:-translate-y-2 hover:shadow-[0_16px_48px_rgba(0,0,0,0.06)]"
+              style={{ transitionTimingFunction: 'var(--ease-spring)' }}
+            >
+              <ShieldCheck className="h-10 w-10 sm:h-12 sm:w-12 text-police-green opacity-90" aria-hidden="true" />
             </div>
-            <p className="text-sm sm:text-base font-bold text-police-green uppercase tracking-wide text-center max-w-xs leading-relaxed">
-              Hệ thống hỗ trợ Hành chính công
+            <p className="text-sm sm:text-base font-bold text-slate-900 tracking-tight text-center max-w-xs leading-relaxed">
+              Hệ thống Hành chính công
               <br />
-              <span className="text-police-gold">Công an tỉnh Hưng Yên</span>
+              <span className="text-police-green">Công an Hưng Yên</span>
             </p>
             <p className="mt-3 text-xs sm:text-sm text-slate-500 text-center max-w-xs leading-relaxed">
               {mode === 'voice'
@@ -236,16 +297,18 @@ export const MessageList: React.FC<MessageListProps> = ({
               <div className="mt-6 flex flex-wrap gap-2 justify-center max-w-sm">
                 <button
                   onClick={() => setDraft('Hướng dẫn làm căn cước công dân')}
-                  className="text-xs px-3 py-2 bg-white border border-slate-200 rounded-full text-slate-600 hover:bg-slate-50 hover:border-police-green/30 hover:text-police-green transition-all duration-200 cursor-pointer shadow-sm"
+                  className="text-[13px] px-4 py-2.5 bg-white border border-slate-200/60 rounded-xl text-slate-700 font-medium hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-all duration-300 cursor-pointer shadow-[0_2px_8px_rgba(0,0,0,0.04)] hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)] active:translate-y-0 active:scale-[0.98]"
+                  style={{ transitionTimingFunction: 'var(--ease-spring)' }}
                 >
-                  <MessageCircle className="w-3 h-3 inline mr-1.5" aria-hidden="true" />
+                  <MessageCircle className="w-4 h-4 inline mr-2 opacity-60" aria-hidden="true" />
                   Làm CCCD
                 </button>
                 <button
                   onClick={() => setDraft('Thủ tục đăng ký xác nhận nơi cư trú')}
-                  className="text-xs px-3 py-2 bg-white border border-slate-200 rounded-full text-slate-600 hover:bg-slate-50 hover:border-police-green/30 hover:text-police-green transition-all duration-200 cursor-pointer shadow-sm"
+                  className="text-[13px] px-4 py-2.5 bg-white border border-slate-200/60 rounded-xl text-slate-700 font-medium hover:bg-slate-50 hover:border-slate-300 hover:text-slate-900 transition-all duration-300 cursor-pointer shadow-[0_2px_8px_rgba(0,0,0,0.04)] hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(0,0,0,0.06)] active:translate-y-0 active:scale-[0.98]"
+                  style={{ transitionTimingFunction: 'var(--ease-spring)' }}
                 >
-                  <MessageCircle className="w-3 h-3 inline mr-1.5" aria-hidden="true" />
+                  <MessageCircle className="w-4 h-4 inline mr-2 opacity-60" aria-hidden="true" />
                   Đăng ký cư trú
                 </button>
               </div>
@@ -263,16 +326,16 @@ export const MessageList: React.FC<MessageListProps> = ({
           >
             {/* Avatar */}
             <div
-              className={`flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full shadow-md ring-2 transition-all duration-300 hover:scale-110 cursor-default ${msg.type === 'user'
-                ? 'bg-gradient-to-br from-blue-500 to-blue-600 ring-blue-200'
-                : 'bg-gradient-to-br from-police-green to-police-green/90 ring-police-gold/50'
+              className={`flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl shadow-[0_4px_12px_rgba(0,0,0,0.06)] ring-1 transition-all duration-300 cursor-default ${msg.type === 'user'
+                ? 'bg-slate-50 ring-black/5'
+                : 'bg-[#F0F0F0] ring-black/5'
                 }`}
               aria-hidden="true"
             >
               {msg.type === 'user' ? (
-                <User className="h-4 w-4 sm:h-5 sm:w-5 text-white" />
+                <User className="h-4 w-4 sm:h-4 sm:w-4 text-slate-700" />
               ) : (
-                <ShieldCheck className="h-4 w-4 sm:h-5 sm:w-5 text-police-gold" />
+                <ShieldCheck className="h-4 w-4 sm:h-5 sm:w-5 text-police-green" />
               )}
             </div>
 
@@ -287,17 +350,17 @@ export const MessageList: React.FC<MessageListProps> = ({
 
               {/* Message Bubble */}
               <div
-                className={`px-4 py-3 sm:px-5 sm:py-3.5 text-sm shadow-md transition-all duration-300 hover:shadow-lg ${msg.type === 'user'
-                  ? 'message-user'
-                  : 'message-ai'
+                className={`px-4 py-3 sm:px-5 sm:py-3.5 text-sm shadow-[0_2px_8px_rgba(0,0,0,0.02)] transition-all duration-300 hover:shadow-[0_8px_16px_rgba(0,0,0,0.04)] ${msg.type === 'user'
+                  ? 'bg-slate-900 text-white rounded-[20px] rounded-tr-md'
+                  : 'bg-slate-50/80 text-slate-900 border border-black/5 backdrop-blur-md rounded-[20px] rounded-tl-md'
                   }`}
               >
                 {msg.type === 'user' ? (
-                  <p className="whitespace-pre-wrap leading-relaxed font-medium">
+                  <p className="whitespace-pre-wrap leading-[1.7] font-normal">
                     {msg.text}
                   </p>
                 ) : (
-                  <div className="prose prose-sm prose-slate max-w-none prose-p:leading-relaxed prose-p:my-1 prose-headings:my-2">
+                  <div className="prose prose-sm prose-slate max-w-none prose-p:leading-[1.75] prose-p:my-1.5 prose-headings:my-2.5 prose-li:leading-[1.7]">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>
                       {msg.text}
                     </ReactMarkdown>
@@ -317,11 +380,12 @@ export const MessageList: React.FC<MessageListProps> = ({
                 <button
                   onClick={() => handlePlayClick(msg)}
                   disabled={loadingMessageId === msg.id}
-                  className={`flex items-center gap-1.5 sm:gap-2 px-2.5 sm:px-3 py-1.5 rounded-lg text-[10px] sm:text-xs font-bold uppercase tracking-wide transition-all duration-200 shadow-sm border cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${msg.type === 'user'
-                    ? 'self-end bg-white text-blue-700 hover:bg-blue-50 border-blue-100 focus-visible:ring-blue-300'
+                  className={`flex items-center gap-1.5 sm:gap-2 px-3 py-1.5 rounded-xl text-[11px] font-bold uppercase tracking-widest transition-all duration-300 shadow-[0_2px_4px_rgba(0,0,0,0.02)] border cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 hover:-translate-y-[1px] active:translate-y-px active:scale-[0.98] ${msg.type === 'user'
+                    ? 'self-end bg-white text-slate-600 hover:bg-slate-50 border-slate-200 focus-visible:ring-slate-300'
                     : 'self-start bg-white text-police-green hover:bg-police-green/5 border-police-green/20 focus-visible:ring-police-green/30'
-                    } ${playingMessageId === msg.id ? 'ring-2 ring-offset-1 ring-police-gold' : ''} ${loadingMessageId === msg.id ? 'opacity-70 cursor-wait' : ''
+                    } ${playingMessageId === msg.id ? 'ring-2 ring-offset-1 ring-police-green/50 bg-police-green/5 text-police-green' : ''} ${loadingMessageId === msg.id ? 'opacity-50 cursor-wait hover:translate-y-0 active:scale-100' : ''
                     }`}
+                  style={{ transitionTimingFunction: 'var(--ease-spring)' }}
                   aria-label={playingMessageId === msg.id ? 'Dừng phát' : 'Phát lại tin nhắn'}
                 >
                   {loadingMessageId === msg.id ? (
@@ -351,13 +415,54 @@ export const MessageList: React.FC<MessageListProps> = ({
           <div
             className="flex w-full flex-row-reverse items-start gap-2.5 sm:gap-3 animate-in fade-in slide-in-from-bottom-4 duration-300"
             role="status"
-            aria-label="Đang ghi nhận giọng nói"
+            aria-label="Đang nghe..."
           >
-            <div className="flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-blue-500 to-blue-600 shadow-md ring-2 ring-blue-200" aria-hidden="true">
-              <User className="h-4 w-4 sm:h-5 sm:w-5 text-white" />
+            <div className="flex relative h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-50 ring-1 ring-black/5 shadow-[0_4px_12px_rgba(0,0,0,0.06)]" aria-hidden="true">
+              <div className="absolute inset-0 rounded-2xl border-2 border-slate-400/50 animate-ping opacity-60" />
+              <User className="h-4 w-4 sm:h-4 sm:w-4 text-slate-700 relative z-10" />
             </div>
-            <div className="max-w-[80%] rounded-2xl rounded-tr-md bg-blue-50 px-4 py-3 sm:px-5 sm:py-3.5 text-sm text-blue-900 shadow-md border border-blue-200 animate-pulse">
-              <p className="font-medium">{transcript}<span className="animate-typing-blink">_</span></p>
+            
+            <div className="flex flex-col gap-1.5 max-w-[85%] sm:max-w-[80%]">
+              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-right text-blue-700/80">
+                Đang nghe bạn nói...
+              </span>
+              <div className="px-4 py-3 sm:px-5 sm:py-3.5 text-sm bg-slate-800 text-slate-200 rounded-[20px] rounded-tr-md shadow-[0_2px_8px_rgba(0,0,0,0.04)]">
+                <p className="whitespace-pre-wrap leading-[1.7] font-normal">
+                  {transcript || <span className="opacity-50 italic">Hãy bắt đầu nói...</span>}
+                  <span className="inline-block w-1.5 h-4 ml-1 bg-white/70 animate-[pulse_1s_ease-in-out_infinite] rounded-sm align-middle" />
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Citizen/STT Processing Indicator */}
+        {!shouldShowTranscript && isSttProcessing && (
+          <div
+            className="flex w-full flex-row-reverse items-start gap-2.5 sm:gap-3 animate-in fade-in slide-in-from-bottom-4 duration-300"
+            role="status"
+            aria-label="Đang xử lý giọng nói công dân"
+          >
+            <div className="flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl bg-slate-50 ring-1 ring-black/5 shadow-[0_4px_12px_rgba(0,0,0,0.06)]" aria-hidden="true">
+              <User className="h-4 w-4 sm:h-4 sm:w-4 text-slate-700" />
+            </div>
+            <div className="flex flex-col gap-1.5 max-w-[85%] sm:max-w-[80%] items-end">
+              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-blue-700/80 flex items-center gap-2">
+                <span className="flex items-center gap-0.5">
+                  <span className="w-1 h-1 bg-blue-500/50 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1 h-1 bg-blue-500/50 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1 h-1 bg-blue-500/50 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
+                Đang xử lý giọng nói...
+              </span>
+              <div className="px-4 py-3 sm:px-5 sm:py-3.5 text-sm bg-slate-900 border border-slate-700 text-slate-300 rounded-[20px] rounded-tr-md shadow-[0_4px_16px_rgba(0,0,0,0.1)]">
+                <div className="flex items-center gap-3">
+                  <Loader2 className="h-4 w-4 animate-spin text-slate-400" aria-hidden="true" />
+                  <span className="font-medium whitespace-pre-wrap leading-relaxed">
+                    {transcript || "Đang chuyển âm thanh thành văn bản..."}
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -369,17 +474,22 @@ export const MessageList: React.FC<MessageListProps> = ({
             role="status"
             aria-label="AI đang xử lý"
           >
-            <div className="flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-police-green to-police-green/90 shadow-md ring-2 ring-police-gold/50" aria-hidden="true">
-              <ShieldCheck className="h-4 w-4 sm:h-5 sm:w-5 text-police-gold" />
+            <div className="flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl bg-[#F0F0F0] ring-1 ring-black/5 shadow-[0_4px_12px_rgba(0,0,0,0.06)]" aria-hidden="true">
+              <ShieldCheck className="h-4 w-4 sm:h-5 sm:w-5 text-police-green" />
             </div>
-            <div className="flex flex-col gap-1.5 max-w-[85%]">
-              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-left text-police-green/80">
+            <div className="flex flex-col gap-1.5 max-w-[85%] sm:max-w-[80%]">
+              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-left text-police-green/80 flex items-center gap-2">
                 Cán bộ hỗ trợ
+                <span className="flex items-center gap-0.5">
+                  <span className="w-1 h-1 bg-police-green/50 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1 h-1 bg-police-green/50 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1 h-1 bg-police-green/50 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
               </span>
-              <div className="message-ai px-4 py-3 sm:px-5 sm:py-3.5 text-sm">
-                <div className="flex items-center gap-3">
-                  <Loader2 className="h-5 w-5 animate-spin text-police-green" aria-hidden="true" />
-                  <span className="text-slate-600 font-medium">Đang xử lý câu hỏi của bạn...</span>
+              <div className="px-4 py-3 sm:px-5 sm:py-3.5 text-sm bg-slate-50/80 border border-black/5 backdrop-blur-md rounded-[20px] rounded-tl-md shadow-sm">
+                <div className="flex items-center gap-3 text-slate-600">
+                  <Loader2 className="h-4 w-4 animate-spin text-police-green" aria-hidden="true" />
+                  <span className="font-medium">Đang suy nghĩ câu trả lời...</span>
                 </div>
               </div>
             </div>
@@ -393,18 +503,26 @@ export const MessageList: React.FC<MessageListProps> = ({
             role="status"
             aria-label="AI đang trả lời"
           >
-            <div className="flex h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-police-green to-police-green/90 shadow-md ring-2 ring-police-gold/50 animate-pulse" aria-hidden="true">
-              <ShieldCheck className="h-4 w-4 sm:h-5 sm:w-5 text-police-gold" />
+            <div className="flex relative h-8 w-8 sm:h-10 sm:w-10 shrink-0 items-center justify-center rounded-2xl bg-[#F0F0F0] ring-1 ring-police-gold/50 shadow-[0_4px_12px_rgba(0,0,0,0.06)]" aria-hidden="true">
+              <div className="absolute inset-0 rounded-2xl border-2 border-police-green/30 animate-[pulse_2s_ease-in-out_infinite]" />
+              <ShieldCheck className="h-4 w-4 sm:h-5 sm:w-5 text-police-green relative z-10" />
             </div>
-            <div className="flex flex-col gap-1.5 max-w-[85%]">
-              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-left text-police-green/80">
+            <div className="flex flex-col gap-1.5 max-w-[85%] sm:max-w-[80%]">
+              <span className="text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-left text-police-green/80 flex items-center gap-2">
                 Cán bộ hỗ trợ
+                <span className="flex items-center gap-0.5">
+                  <span className="w-1.5 h-1.5 bg-police-green rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-1.5 h-1.5 bg-police-green rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-1.5 h-1.5 bg-police-green rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
               </span>
-              <div className="message-ai px-4 py-3 sm:px-5 sm:py-3.5 text-sm prose prose-sm prose-slate max-w-none prose-p:leading-relaxed prose-p:my-1 prose-headings:my-2">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {streamingAiText}
-                </ReactMarkdown>
-                <span className="inline-block w-2 h-4 ml-1 bg-police-green/80 animate-typing-blink rounded-sm" aria-hidden="true" />
+              <div className="px-4 py-3 sm:px-5 sm:py-3.5 text-sm bg-slate-50/80 border border-black/5 backdrop-blur-md rounded-[20px] rounded-tl-md shadow-[0_2px_12px_rgba(0,0,0,0.04)] relative">
+                <div className="prose prose-sm prose-slate max-w-none prose-p:leading-[1.75] prose-p:my-1.5 prose-headings:my-2.5 prose-li:leading-[1.7]">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                    {streamingAiText}
+                  </ReactMarkdown>
+                  <span className="inline-block w-[2px] h-[1.1em] ml-0.5 bg-police-green/70 animate-[pulse_1s_ease-in-out_infinite] rounded-sm align-text-bottom" aria-hidden="true" />
+                </div>
               </div>
             </div>
           </div>
@@ -430,8 +548,9 @@ export const MessageList: React.FC<MessageListProps> = ({
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
               placeholder={isConnected ? 'Nhập câu hỏi của bạn tại đây...' : 'Đang kết nối...'}
-              rows={2}
-              className="w-full resize-none rounded-xl border border-slate-300 bg-slate-50 px-3 sm:px-4 py-2.5 sm:py-3 text-sm text-slate-800 shadow-inner outline-none transition-all duration-200 focus:border-police-green focus:ring-2 focus:ring-police-green/20 focus:bg-white placeholder:text-slate-400 disabled:opacity-60"
+              rows={1}
+              className="w-full min-h-[44px] sm:min-h-[48px] max-h-32 resize-none rounded-2xl border border-black/10 bg-slate-50 px-4 py-3 text-sm text-slate-900 shadow-sm outline-none transition-all duration-300 focus:border-police-green focus:ring-4 focus:ring-police-green/10 focus:bg-white placeholder:text-slate-400 disabled:opacity-50"
+              style={{ transitionTimingFunction: 'var(--ease-spring)' }}
               disabled={!isConnected}
               aria-label="Nhập tin nhắn"
               onKeyDown={(e) => {
@@ -447,10 +566,11 @@ export const MessageList: React.FC<MessageListProps> = ({
             <button
               type="submit"
               disabled={!canSend}
-              className={`flex h-10 w-10 sm:h-12 sm:w-12 shrink-0 items-center justify-center rounded-xl shadow-lg transition-all duration-200 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 ${canSend
-                ? 'bg-gradient-to-br from-police-green to-police-green/90 text-white hover:from-police-green/90 hover:to-police-green hover:scale-105 active:scale-95 focus-visible:ring-police-green/30'
-                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+              className={`flex h-[44px] w-[44px] sm:h-[48px] sm:w-[48px] shrink-0 items-center justify-center rounded-2xl shadow-sm transition-all duration-300 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${canSend
+                ? 'bg-police-green text-white hover:bg-police-green/90 hover:-translate-y-[2px] hover:shadow-[0_8px_16px_rgba(0,87,61,0.2)] active:translate-y-px active:scale-[0.96] focus-visible:ring-police-green/30'
+                : 'bg-slate-100 text-slate-300 cursor-not-allowed'
                 }`}
+              style={{ transitionTimingFunction: 'var(--ease-spring)' }}
               aria-label="Gửi tin nhắn"
             >
               <Send className="h-4 w-4 sm:h-5 sm:w-5" aria-hidden="true" />

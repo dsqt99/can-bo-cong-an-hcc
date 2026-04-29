@@ -10,6 +10,7 @@ interface SettingsProps {
 
 export interface SettingsData {
   // LLM
+  llmProvider: string;
   aiModel: string;
   llmApiUrl: string;
   llmApiKey: string;
@@ -18,7 +19,6 @@ export interface SettingsData {
   // TTS
   ttsEngine: string;
   ttsVoice: string;
-  ttsModel: string;
   speakingRate: number;
   // Other
   systemPrompt: string;
@@ -47,6 +47,40 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, settings, o
   const [formData, setFormData] = useState<SettingsData>(settings);
   const [showApiKey, setShowApiKey] = useState(false);
   const [activeSection, setActiveSection] = useState<string>('llm');
+
+  const [vllmModels, setVllmModels] = useState<string[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
+
+  // Fetch vLLM models when provider is vLLM
+  useEffect(() => {
+    if (formData.llmProvider === 'vllm' && isOpen) {
+      const fetchModels = async () => {
+        setLoadingModels(true);
+        try {
+          let baseUrl = formData.llmApiUrl || 'https://vllm.anm05.com/v1';
+          if (!baseUrl.endsWith('/v1') && !baseUrl.includes('v1')) {
+             baseUrl = baseUrl.replace(/\/$/, '') + '/v1';
+          } else {
+             baseUrl = baseUrl.replace(/\/$/, '');
+          }
+          const res = await fetch(`${baseUrl}/models?return_wildcard_routes=false&include_model_access_groups=false&only_model_access_groups=false&include_metadata=false`, {
+            headers: { 'accept': 'application/json' }
+          });
+          const data = await res.json();
+          if (data && data.data) {
+            setVllmModels(data.data.map((m: any) => m.id));
+          }
+        } catch (e) {
+          console.error("Failed to fetch vllm models", e);
+        } finally {
+          setLoadingModels(false);
+        }
+      };
+      
+      const timeoutId = setTimeout(fetchModels, 500); // debounce API call slightly
+      return () => clearTimeout(timeoutId);
+    }
+  }, [formData.llmProvider, formData.llmApiUrl, isOpen]);
 
   useEffect(() => {
     if (isOpen) {
@@ -142,15 +176,42 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, settings, o
           {/* ── LLM ── */}
           <Section id="llm" icon={<Cpu className="h-4 w-4 text-police-green" />} title="Model ngôn ngữ (LLM)">
             <div>
-              <label htmlFor="aiModel" className={labelCls}>Tên model</label>
-              <input
-                id="aiModel"
-                type="text"
-                value={formData.aiModel}
-                onChange={(e) => handleChange('aiModel', e.target.value)}
+              <label htmlFor="llmProvider" className={labelCls}>Nhà cung cấp (Provider)</label>
+              <select
+                id="llmProvider"
+                value={formData.llmProvider || 'litellm'}
+                onChange={(e) => {
+                  const p = e.target.value;
+                  let nextUrl = formData.llmApiUrl;
+                  
+                  const knownDefaults = [
+                    'https://vllm.anm05.com/v1',
+                    'https://chat.anm05.com/api',
+                    'https://api.openai.com/v1',
+                    'http://localhost:11434/v1',
+                    'https://generativelanguage.googleapis.com/v1beta/openai/'
+                  ];
+                  
+                  // if empty or matches any known default, automatically set to new provider's default
+                  if (!nextUrl || knownDefaults.includes(nextUrl) || nextUrl.includes('chat.anm05.com') || nextUrl.includes('vllm.anm05.com')) {
+                    if (p === 'vllm') nextUrl = 'https://vllm.anm05.com/v1';
+                    else if (p === 'litellm') nextUrl = 'https://chat.anm05.com/api';
+                    else if (p === 'openai') nextUrl = 'https://api.openai.com/v1';
+                    else if (p === 'gemini') nextUrl = 'https://generativelanguage.googleapis.com/v1beta/openai/';
+                    else if (p === 'ollama') nextUrl = 'http://localhost:11434/v1';
+                  }
+                  
+                  handleChange('llmApiUrl', nextUrl);
+                  handleChange('llmProvider', p);
+                }}
                 className={inputCls}
-                placeholder="vd: chatbot-cahy, qwen-text, gemini-2.5-flash"
-              />
+              >
+                <option value="litellm">Mặc định (LiteLLM)</option>
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Google Gemini</option>
+                <option value="vllm">vLLM (Local / Custom API)</option>
+                <option value="ollama">Ollama (Local)</option>
+              </select>
             </div>
             <div>
               <label htmlFor="llmApiUrl" className={labelCls}>API Base URL</label>
@@ -160,8 +221,51 @@ export const Settings: React.FC<SettingsProps> = ({ isOpen, onClose, settings, o
                 value={formData.llmApiUrl}
                 onChange={(e) => handleChange('llmApiUrl', e.target.value)}
                 className={inputCls}
-                placeholder="vd: https://chat.anm05.com/api"
+                placeholder={formData.llmProvider === 'vllm' ? "vd: https://vllm.anm05.com/v1" : "vd: https://chat.anm05.com/api"}
               />
+            </div>
+            <div>
+              <label htmlFor="aiModel" className={labelCls}>Tên model {loadingModels && <span className="text-xs font-normal text-police-green">(đang tự động tải danh sách...)</span>}</label>
+              <input
+                id="aiModel"
+                type="text"
+                value={formData.aiModel}
+                onChange={(e) => handleChange('aiModel', e.target.value)}
+                className={inputCls}
+                placeholder="Nhập tên hoặc chọn từ danh sách..."
+                list="aiModelsList"
+              />
+              <datalist id="aiModelsList">
+                {formData.llmProvider === 'litellm' && (
+                  <option value="chatbot-cahy" label="Mặc định (LiteLLM)" />
+                )}
+                {formData.llmProvider === 'openai' && (
+                  <>
+                    <option value="gpt-4o" label="OpenAI GPT-4o" />
+                    <option value="gpt-4o-mini" label="OpenAI GPT-4o Mini" />
+                    <option value="gpt-4-turbo" label="OpenAI GPT-4 Turbo" />
+                    <option value="gpt-3.5-turbo" label="OpenAI GPT-3.5 Turbo" />
+                  </>
+                )}
+                {formData.llmProvider === 'gemini' && (
+                  <>
+                    <option value="gemini-2.5-flash" label="Google Gemini 2.5 Flash" />
+                    <option value="gemini-2.0-flash" label="Google Gemini 2.0 Flash" />
+                    <option value="gemini-1.5-pro" label="Google Gemini 1.5 Pro" />
+                    <option value="gemini-1.5-flash" label="Google Gemini 1.5 Flash" />
+                  </>
+                )}
+                {formData.llmProvider === 'vllm' && vllmModels.map((m) => (
+                  <option key={m} value={m} label="vLLM API Model" />
+                ))}
+                {formData.llmProvider === 'ollama' && (
+                  <>
+                    <option value="llama3" label="Meta Llama 3" />
+                    <option value="qwen2" label="Qwen 2" />
+                    <option value="mistral" label="Mistral" />
+                  </>
+                )}
+              </datalist>
             </div>
             <div>
               <label htmlFor="llmApiKey" className={labelCls}>API Key</label>

@@ -12,3 +12,11 @@ langchain-google-genai
 langchain-core
 gradio_client
 vietnormalizer
+asyncpg
+elevenlabs
+
+# LangGraph và LangChain cho RAG Agent
+langgraph>=0.2.0
+langchain-openai>=0.2.0
+langchain-community>=0.3.0
+tiktoken>=0.7.0

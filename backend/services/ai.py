@@ -1,186 +1,182 @@
 import os
 import re
+import json
 import logging
-from typing import Dict, List
+import asyncio
+from typing import Dict, List, Optional
 from collections import defaultdict
 from openai import AsyncOpenAI
 
 logger = logging.getLogger(__name__)
 
 
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        return default
+
+
 class LLMAgent:
-    """
-    AI Agent using OpenAI-compatible API (vLLM + LiteLLM backend).
-    Uses the `openai` Python SDK for both streaming and non-streaming chat completions.
-    """
+    """AI Agent using an OpenAI-compatible chat completions API."""
 
     def __init__(self):
-        self.base_url = os.getenv("LLM_API_URL", "https://chat.anm05.com/api")
-        self.api_key = os.getenv("LLM_API_KEY", os.getenv("LITELLM_MASTER_KEY", ""))
+        self.base_url = os.getenv("LLM_API_URL", "https://chat.anm05.com/api/v1")
+        self.api_key = os.getenv("LLM_API_KEY", "")
         self.model = os.getenv("LLM_MODEL", "chatbot-cahy")
+        self.last_messages = _env_int("LAST_MESSAGES", 20)
         self.system_prompt = (
-            "You are a helpful voice assistant. Keep your responses concise and conversational. "
-            "You also need to output an emotion tag at the start of your response like [HAPPY], [SAD], [NEUTRAL], [THINKING], [SURPRISED], [ANGRY]. "
+            "You must output an emotion tag at the very start of your response: "
+            "[HAPPY], [SAD], [NEUTRAL], [THINKING], [SURPRISED], or [ANGRY]. "
             "Example: '[HAPPY] Hello! How can I help you today?'"
         )
-        # Store chat history per session
         self.sessions: Dict[str, List[Dict[str, str]]] = defaultdict(list)
-        
-        # Initialize AsyncOpenAI client
-        self.client = None
-        self.update_model(self.model)
-        
-        logger.info(f"🤖 AI Agent initialized: model={self.model}")
-
-    def update_prompt(self, new_prompt: str):
-        """Update the system prompt"""
-        self.system_prompt = new_prompt
-
-    def update_model(self, model_name: str):
-        """Update the AI model and recreate client if needed"""
-        self.model = model_name
-        
-        if "gemini" in self.model.lower():
-            self.base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
-            self.api_key = os.getenv("GOOGLE_API_KEY", "")
-        else:
-            self.base_url = os.getenv("LLM_API_URL", "https://chat.anm05.com/api")
-            self.api_key = os.getenv("LLM_API_KEY", os.getenv("LITELLM_MASTER_KEY", ""))
-            
         self.client = AsyncOpenAI(
             base_url=self.base_url,
             api_key=self.api_key,
         )
-        logger.info(f"🤖 AI model updated to: {model_name}, api_base={self.base_url}")
+
+        logger.info(f"🤖 AI Agent initialized: model={self.model}, base_url={self.base_url}")
 
     def get_session_history(self, session_id: str) -> List[Dict[str, str]]:
-        """Get chat history for a session"""
         return self.sessions[session_id]
 
     def clear_session(self, session_id: str):
-        """Clear chat history for a session"""
         if session_id in self.sessions:
             self.sessions[session_id] = []
             logger.info(f"Cleared session: {session_id}")
 
     def clear_all_sessions(self):
-        """Clear all chat sessions"""
         self.sessions.clear()
         logger.info("Cleared all sessions")
 
     def _build_messages(self, session_id: str, user_message: str) -> List[Dict[str, str]]:
-        """Build messages array with system prompt and chat history"""
-        messages = []
-        
-        # Add system prompt as first message
-        messages.append({
-            "role": "system",
-            "content": self.system_prompt
-        })
-        
-        # Add chat history
-        messages.extend(self.sessions[session_id])
-        
-        # Add current user message
-        messages.append({
-            "role": "user",
-            "content": user_message
-        })
-        
+        messages = [{"role": "system", "content": self.system_prompt}]
+        messages.extend(self.sessions[session_id][-self.last_messages:])
+        messages.append({"role": "user", "content": user_message})
         return messages
 
     def _add_to_history(self, session_id: str, role: str, content: str):
-        """Add a message to session history"""
         self.sessions[session_id].append({
             "role": role,
             "content": content
         })
-        
-        # Limit history to last 20 messages to prevent memory issues
-        if len(self.sessions[session_id]) > 20:
-            self.sessions[session_id] = self.sessions[session_id][-20:]
+
+        if len(self.sessions[session_id]) > self.last_messages:
+            self.sessions[session_id] = self.sessions[session_id][-self.last_messages:]
+
+        try:
+            from services.db import db_manager
+            asyncio.create_task(db_manager.save_message(session_id, role, content))
+        except RuntimeError:
+            pass
 
     @staticmethod
     def _strip_think(text: str) -> str:
-        """Remove <think>...</think> blocks from Qwen3 model output"""
-        return re.sub(r'<think>[\s\S]*?</think>', '', text).strip()
+        return re.sub(r'<think>[\s\S]*?</think>', '', text)
 
     async def process(self, text: str, session_id: str = "default"):
-        """Process text and return full response (non-streaming)"""
         try:
             messages = self._build_messages(session_id, text)
-            
             response = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=0.7,
             )
-            
-            assistant_message = response.choices[0].message.content or ""
-            assistant_message = self._strip_think(assistant_message)
-            
-            if assistant_message:
+            assistant_message = self._strip_think(response.choices[0].message.content or "")
+
+            if assistant_message.strip():
                 self._add_to_history(session_id, "user", text)
-                self._add_to_history(session_id, "assistant", assistant_message)
-            
+                self._add_to_history(session_id, "assistant", assistant_message.strip())
+
             return assistant_message
-                
+
         except Exception as e:
             logger.error(f"AI Processing Error: {e}")
             return "[NEUTRAL] I'm sorry, I'm having trouble thinking right now."
 
     async def process_stream(self, text: str, session_id: str = "default"):
-        """Process text and stream response chunks using OpenAI streaming API.
-        Strips <think>...</think> blocks from Qwen3 output before yielding."""
         full_response = ""
-        in_think_block = False
-        think_ended = False
-        
+        yielded_length = 0
+
         try:
             messages = self._build_messages(session_id, text)
-            
             stream = await self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
                 temperature=0.7,
                 stream=True,
             )
-            
-            async for chunk in stream:
-                if chunk.choices and len(chunk.choices) > 0:
-                    delta = chunk.choices[0].delta
-                    if delta and delta.content:
-                        token = delta.content
-                        full_response += token
-                        
-                        # Skip tokens inside <think>...</think>
-                        if not think_ended:
-                            if '<think>' in full_response and not in_think_block:
-                                in_think_block = True
-                            if in_think_block:
-                                if '</think>' in full_response:
-                                    think_ended = True
-                                    # Extract content after </think>
-                                    after_think = full_response.split('</think>', 1)[1].strip()
-                                    if after_think:
-                                        yield after_think
-                                continue
-                        else:
-                            yield token
-                    
-                    # Check for finish reason
-                    if chunk.choices[0].finish_reason is not None:
-                        break
-            
-            # Strip think block from full response for history
+
+            async for token in self._sdk_stream_tokens(stream):
+                full_response += token
+                clean_text = self._strip_think(full_response)
+                in_think_block = full_response.count('<think>') > full_response.count('</think>')
+
+                if in_think_block:
+                    last_think_idx = clean_text.rfind('<think>')
+                    if last_think_idx != -1:
+                        clean_text = clean_text[:last_think_idx]
+
+                if not in_think_block:
+                    new_text = clean_text[yielded_length:]
+                    if new_text:
+                        if new_text.endswith(('<', '<t', '<th', '<thi', '<thin', '<think')):
+                            continue
+                        yield new_text
+                        yielded_length += len(new_text)
+
             clean_response = self._strip_think(full_response)
-            
-            # After streaming completes, add to history
-            if clean_response:
+            new_text = clean_response[yielded_length:]
+            if new_text:
+                yield new_text
+
+            if clean_response.strip():
                 self._add_to_history(session_id, "user", text)
-                self._add_to_history(session_id, "assistant", clean_response)
-                
+                self._add_to_history(session_id, "assistant", clean_response.strip())
+
         except Exception as e:
             logger.error(f"AI Streaming Error: {e}")
-            error_msg = "[NEUTRAL] I'm sorry, I'm having trouble thinking right now."
-            yield error_msg
+            yield "[NEUTRAL] I'm sorry, I'm having trouble thinking right now."
+
+    @staticmethod
+    async def _sdk_stream_tokens(stream):
+        async for chunk in stream:
+            if chunk.choices and len(chunk.choices) > 0:
+                delta = chunk.choices[0].delta
+                if delta and delta.content:
+                    yield delta.content
+                if chunk.choices[0].finish_reason is not None:
+                    break
+
+    def update_prompt(self, new_prompt: str):
+        if new_prompt:
+            self.system_prompt = new_prompt
+            logger.info("🤖 System prompt updated")
+
+    def update_all_configs(
+        self,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        url: Optional[str] = None,
+        key: Optional[str] = None,
+    ):
+        needs_reinit = False
+
+        if model and model != self.model:
+            self.model = model
+
+        if url and url != self.base_url:
+            self.base_url = url
+            needs_reinit = True
+
+        if key is not None and key != self.api_key:
+            self.api_key = key
+            needs_reinit = True
+
+        if needs_reinit:
+            logger.info(f"🤖 Re-initializing LLM client: model={self.model}, base_url={self.base_url}")
+            self.client = AsyncOpenAI(
+                base_url=self.base_url,
+                api_key=self.api_key,
+            )

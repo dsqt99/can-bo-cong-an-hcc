@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { Mic, MicOff, AlertCircle, PanelRight } from 'lucide-react';
+import { Mic, MicOff, AlertCircle, PanelRight, ShieldCheck, X } from 'lucide-react';
 import { AppState, Emotion } from '../types';
 import { AudioVisualizer } from './AudioVisualizer';
 import { EMOJI_BASE_URL } from '../config/api';
@@ -17,6 +17,7 @@ interface AvatarSectionProps {
   mode: 'voice' | 'chat';
   isChatVisible?: boolean;
   onToggleChat?: () => void;
+  onEndConversation?: () => void;
 }
 
 const EMOJI_MAP: Record<string, string> = {
@@ -30,17 +31,7 @@ const EMOJI_MAP: Record<string, string> = {
   'SPEAKING': 'happy.jpeg',
 };
 
-// SVG Star Icon Component
-const StarIcon: React.FC<{ className?: string }> = ({ className }) => (
-  <svg
-    className={className}
-    viewBox="0 0 24 24"
-    fill="currentColor"
-    aria-hidden="true"
-  >
-    <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
-  </svg>
-);
+// Removed StarIcon as it is no longer used
 
 export const AvatarSection: React.FC<AvatarSectionProps> = ({
   appState,
@@ -55,6 +46,7 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
   mode,
   isChatVisible = true,
   onToggleChat,
+  onEndConversation,
 }) => {
   const currentGif = useMemo(() => {
     let filename = EMOJI_MAP['NEUTRAL'];
@@ -122,23 +114,24 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
 
   return (
     <section
-      className="relative flex h-full w-full flex-col overflow-hidden bg-gradient-to-br from-slate-50 via-slate-100 to-slate-50"
+      className="relative flex h-full w-full flex-col overflow-hidden bg-[#FAFAFA]"
       aria-label="Khu vực avatar cán bộ ảo"
     >
-      {/* Background Pattern - Formal Geometric */}
-      <div className="absolute inset-0 opacity-[0.03] pointer-events-none" aria-hidden="true">
+      {/* Background Masked Pattern */}
+      <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-slate-100 to-transparent pointer-events-none" aria-hidden="true" />
+      <div className="absolute inset-0 opacity-[0.04] pointer-events-none mix-blend-multiply" aria-hidden="true">
         <div
           className="absolute inset-0"
           style={{
-            backgroundImage: `radial-gradient(circle at 1px 1px, rgba(0,87,61,0.5) 1px, transparent 0)`,
-            backgroundSize: '24px 24px',
+            backgroundImage: `radial-gradient(circle at 1px 1px, #00573D 1px, transparent 0)`,
+            backgroundSize: '32px 32px',
           }}
         />
       </div>
 
       {/* Header / Status Bar */}
       <div
-        className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center px-4 sm:px-6 h-[52px] sm:h-[60px] glass border-b border-police-green/10"
+        className="absolute top-0 left-0 right-0 z-20 flex justify-between items-center px-4 sm:px-6 h-[52px] sm:h-[60px] bg-white/70 backdrop-blur-xl border-b border-black/5"
         role="status"
         aria-live="polite"
       >
@@ -178,6 +171,19 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
               <PanelRight className="h-5 w-5" aria-hidden="true" />
             </button>
           )}
+
+          {/* End Conversation Button */}
+          {onEndConversation && (
+            <button
+              onClick={onEndConversation}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-police-red/10 hover:bg-police-red/20 border border-police-red/20 hover:border-police-red/40 rounded-lg text-police-red text-xs font-semibold uppercase tracking-wider transition-all duration-300 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-police-red/50"
+              aria-label="Kết thúc cuộc trò chuyện"
+              title="Kết thúc cuộc trò chuyện"
+            >
+              <X className="h-4 w-4" aria-hidden="true" />
+              <span className="hidden sm:inline">Kết thúc</span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -188,28 +194,28 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
         <div className="relative z-10 flex flex-col items-center">
 
           {/* Avatar with enhanced styling */}
-          <div className="relative">
+          <div className="relative flex flex-col items-center">
             {/* Outer glow ring - animated when active */}
             {(appState === 'listening' || appState === 'speaking') && (
               <div
-                className="absolute -inset-3 sm:-inset-4 rounded-full border-4 border-police-gold/30 animate-ripple"
+                className="absolute -inset-3 sm:-inset-4 rounded-full border-4 border-police-gold/30 animate-ripple z-0"
                 aria-hidden="true"
               />
             )}
 
             {/* Main avatar circle */}
             <div
-              className={`relative w-36 h-36 sm:w-48 sm:h-48 md:w-56 md:h-56 lg:w-64 lg:h-64 rounded-full shadow-2xl overflow-hidden transition-all duration-500 ${appState === 'listening' ? 'ring-4 ring-red-400/50' :
-                appState === 'speaking' ? 'ring-4 ring-police-green/50' :
-                  'ring-4 ring-police-gold/30'
+              className={`relative z-10 w-40 h-40 sm:w-48 sm:h-48 md:w-56 md:h-56 lg:w-60 lg:h-60 rounded-full shadow-[0_16px_40px_rgba(0,0,0,0.1)] overflow-hidden transition-all duration-500 ease-out ${appState === 'listening' ? 'ring-4 ring-red-500/20 shadow-[0_16px_40px_rgba(218,37,29,0.2)]' :
+                appState === 'speaking' ? 'ring-4 ring-police-green/20 shadow-[0_16px_40px_rgba(0,87,61,0.2)]' :
+                  'ring-1 ring-black/5'
                 }`}
               style={{
-                background: 'linear-gradient(135deg, #dbeafe 0%, #ffffff 50%, #f0fdf4 100%)',
+                background: '#F0F0F0',
               }}
             >
-              {/* Golden border */}
+              {/* Golden inner shadow border instead of thick stroke */}
               <div
-                className="absolute inset-0 rounded-full border-4 border-police-gold shadow-inner pointer-events-none z-10"
+                className="absolute inset-0 rounded-full border border-police-gold/40 shadow-[inset_0_4px_16px_rgba(255,204,0,0.2)] pointer-events-none z-10"
                 aria-hidden="true"
               />
 
@@ -233,33 +239,34 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
                 aria-hidden="true"
               />
             </div>
-          </div>
 
-          {/* Nameplate */}
-          <div
-            className="mt-3 sm:mt-4 bg-gradient-to-r from-police-green via-police-green to-police-green/95 text-white px-5 sm:px-6 py-2 sm:py-2.5 rounded-xl shadow-lg border-2 border-police-gold relative transform transition-all duration-300 hover:-translate-y-0.5 hover:shadow-xl cursor-default"
-          >
-            <div className="text-center">
-              <div className="text-[10px] sm:text-xs text-police-gold font-bold uppercase tracking-widest mb-0.5">
-                Cán bộ hỗ trợ
+            {/* Nameplate - strictly overlapping the avatar */}
+            <div
+              className="absolute -bottom-4 sm:-bottom-5 z-20 bg-white/95 backdrop-blur-xl text-slate-900 px-4 sm:px-5 py-2 sm:py-2.5 rounded-2xl shadow-[0_8px_24px_rgba(0,0,0,0.08)] border border-black/5 flex items-center gap-3 w-max transform transition-all duration-300 hover:-translate-y-1 hover:shadow-[0_12px_32px_rgba(0,0,0,0.12)] cursor-default"
+              style={{ transitionTimingFunction: 'var(--ease-spring)' }}
+            >
+              <div className="flex items-center justify-center bg-slate-50 rounded-full p-2 border border-black/5 shadow-inner">
+                <ShieldCheck className="w-5 h-5 sm:w-6 sm:h-6 text-police-gold drop-shadow-sm" aria-hidden="true" />
               </div>
-              <div className="text-sm sm:text-lg font-bold uppercase tracking-wide">
-                Đại úy ảo AI
+              <div className="text-left">
+                <div className="text-[10px] sm:text-[11px] text-slate-500 font-bold uppercase tracking-[0.15em] mb-0.5">
+                  Cán bộ hỗ trợ
+                </div>
+                <div className="text-sm sm:text-base font-bold tracking-tight text-slate-900 leading-none">
+                  Đại úy ảo AI
+                </div>
               </div>
             </div>
-            {/* Decorative SVG stars */}
-            <StarIcon className="absolute -top-2 -left-2 sm:-top-2.5 sm:-left-2.5 w-4 h-4 sm:w-5 sm:h-5 text-police-gold drop-shadow-md" />
-            <StarIcon className="absolute -top-2 -right-2 sm:-top-2.5 sm:-right-2.5 w-4 h-4 sm:w-5 sm:h-5 text-police-gold drop-shadow-md" />
           </div>
 
           {/* Status Badge */}
           <div
-            className={`mt-3 sm:mt-4 flex items-center gap-2 px-4 py-2 rounded-full ${statusConfig.bg} border ${statusConfig.border} transition-all duration-300`}
+            className={`mt-10 flex items-center gap-2 px-4 py-2 sm:py-2.5 rounded-full ${statusConfig.bg} border ${statusConfig.border} transition-all duration-300 shadow-sm`}
             role="status"
             aria-live="polite"
           >
             <div className={`w-2 h-2 rounded-full ${statusConfig.dot} ${appState !== 'idle' ? 'animate-pulse' : ''}`} aria-hidden="true" />
-            <span className={`text-sm font-semibold ${statusConfig.color}`}>
+            <span className={`text-xs sm:text-sm font-semibold ${statusConfig.color}`}>
               {getStatusText()}
             </span>
           </div>
@@ -278,24 +285,25 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
       </div>
 
       {/* Footer Controls */}
-      <div className="relative z-20 p-3 sm:p-4 glass border-t border-slate-200/60 flex justify-center items-center">
+      <div className="relative z-20 p-4 sm:p-5 bg-white/50 backdrop-blur-xl border-t border-black/5 flex justify-center items-center h-28 sm:h-32">
         {mode === 'voice' && (
           <button
             onClick={appState === 'listening' ? stopRecording : handleStartListening}
             disabled={appState === 'processing' || appState === 'speaking'}
             className={`
-              relative group flex items-center justify-center w-14 h-14 sm:w-16 sm:h-16 rounded-full shadow-lg 
+              relative group flex items-center justify-center w-16 h-16 sm:w-20 sm:h-20 rounded-full
               transition-all duration-300 cursor-pointer
-              focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-offset-2
+              focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-4
               ${appState === 'listening'
-                ? 'bg-gradient-to-br from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 ring-4 ring-red-200 scale-105 focus-visible:ring-red-300'
-                : 'bg-gradient-to-br from-police-green to-police-green/90 hover:from-police-green/90 hover:to-police-green ring-4 ring-police-green/20 hover:scale-105 focus-visible:ring-police-green/30'
+                ? 'bg-red-500 hover:bg-red-600 shadow-[0_8px_32px_rgba(239,68,68,0.4)] hover:-translate-y-1 focus-visible:ring-red-500'
+                : 'bg-police-green hover:bg-police-green/90 shadow-[0_8px_32px_rgba(0,87,61,0.3)] hover:-translate-y-1 focus-visible:ring-police-green'
               }
               ${(appState === 'processing' || appState === 'speaking')
-                ? 'opacity-50 cursor-not-allowed hover:scale-100'
-                : 'active:scale-95'
+                ? 'opacity-60 cursor-not-allowed hover:translate-y-0 !shadow-none'
+                : 'active:translate-y-px active:scale-[0.98]'
               }
             `}
+            style={{ transitionTimingFunction: 'var(--ease-spring)' }}
             aria-label={appState === 'listening' ? 'Dừng ghi âm' : 'Bắt đầu nói'}
           >
             {appState === 'listening' ? (
@@ -314,13 +322,6 @@ export const AvatarSection: React.FC<AvatarSectionProps> = ({
               aria-hidden="true"
             />
           </button>
-        )}
-
-        {/* Helper text */}
-        {mode === 'voice' && appState === 'idle' && (
-          <p className="absolute bottom-16 sm:bottom-20 text-xs sm:text-sm text-slate-500 font-medium">
-            Nhấn để bắt đầu nói
-          </p>
         )}
 
         {/* Error message */}
