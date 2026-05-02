@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { Message, AppState, WebSocketMessage, Emotion, SessionHistoryItem } from '../types';
 import { SettingsData } from '../components/Settings';
 import { WS_CHAT_URL } from '../config/api';
+import { startPcmCapture } from './audioWorkletSource';
 
 const SESSION_HISTORY_KEY = 'voiceBotSessionHistoryV1';
 
@@ -49,12 +50,16 @@ export const useAudioStream = (settings?: SettingsData) => {
 
   // Streaming audio refs (MediaRecorder for recording + AudioWorklet/ScriptProcessor for streaming)
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const workletNodeRef = useRef<AudioWorkletNode | ScriptProcessorNode | null>(null);
+  const pcmCaptureStopRef = useRef<(() => void) | null>(null);
 
   // Silence detection refs
   const lastVoiceActivityAtRef = useRef<number | null>(null);
   const didAutoStopSegmentRef = useRef(false);
   const firstVoiceDetectedRef = useRef(false);
+
+  // Timing refs for latency instrumentation
+  const recordingStartedAtRef = useRef<number | null>(null);
+  const firstPcmSentRef = useRef(false);
 
   const loadSessionArchives = (): SessionArchive[] => {
     try {
@@ -436,39 +441,39 @@ export const useAudioStream = (settings?: SettingsData) => {
       setInputAnalyser(analyser);
 
       // Tell backend to start STT stream
+      recordingStartedAtRef.current = performance.now();
+      firstPcmSentRef.current = false;
       if (socketRef.current?.readyState === WebSocket.OPEN) {
         socketRef.current.send(JSON.stringify({ type: 'audio_stream_start' }));
       }
 
-      // Use MediaRecorder to capture audio as webm chunks and stream to backend
-      const chunks: Blob[] = [];
-      const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
-
-      mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
-          chunks.push(event.data);
-          userRecordedAudioRef.current.push(event.data);
-
-          // Stream the chunk to backend as binary
-          if (socketRef.current?.readyState === WebSocket.OPEN) {
-            event.data.arrayBuffer().then((buffer) => {
-              if (socketRef.current?.readyState === WebSocket.OPEN) {
-                socketRef.current.send(buffer);
-              }
-            });
+      // Start PCM capture for realtime streaming
+      const pcmHandle = await startPcmCapture({
+        audioContext: audioContextRef.current,
+        stream,
+        onPcmChunk: (buffer) => {
+          if (!firstPcmSentRef.current && recordingStartedAtRef.current != null) {
+            firstPcmSentRef.current = true;
+            console.log(`⏱️ First PCM sent: ${((performance.now() - recordingStartedAtRef.current) / 1000).toFixed(2)}s`);
           }
-        }
-      };
+          if (socketRef.current?.readyState === WebSocket.OPEN) {
+            socketRef.current.send(buffer);
+          }
+        },
+      });
+      pcmCaptureStopRef.current = pcmHandle.stop;
 
-      mediaRecorder.onstop = () => {
-        // Signal backend to stop STT stream
-        if (socketRef.current?.readyState === WebSocket.OPEN) {
-          socketRef.current.send(JSON.stringify({ type: 'audio_stream_stop' }));
-        }
-      };
-
-      mediaRecorder.start(100); // Send chunks every 100ms
-      mediaRecorderRef.current = mediaRecorder;
+      // Keep MediaRecorder for local recording backup
+      if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+        const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+        mediaRecorder.ondataavailable = (event) => {
+          if (event.data.size > 0) {
+            userRecordedAudioRef.current.push(event.data);
+          }
+        };
+        mediaRecorder.start(1000);
+        mediaRecorderRef.current = mediaRecorder;
+      }
 
       // Reset silence detection refs
       lastVoiceActivityAtRef.current = performance.now();
@@ -494,21 +499,25 @@ export const useAudioStream = (settings?: SettingsData) => {
   }, []);
 
   const stopMediaRecorder = () => {
+    if (pcmCaptureStopRef.current) {
+      try {
+        pcmCaptureStopRef.current();
+      } catch (_) { /* ignore */ }
+      pcmCaptureStopRef.current = null;
+    }
+
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-      mediaRecorderRef.current.stop(); // This triggers onstop → sends audio_stream_stop
+      mediaRecorderRef.current.stop();
     }
     mediaRecorderRef.current = null;
-
-    if (workletNodeRef.current) {
-      try {
-        (workletNodeRef.current as any).disconnect?.();
-      } catch (_) { /* ignore */ }
-      workletNodeRef.current = null;
-    }
 
     if (mediaStreamRef.current) {
       mediaStreamRef.current.getTracks().forEach((track) => track.stop());
       mediaStreamRef.current = null;
+    }
+
+    if (socketRef.current?.readyState === WebSocket.OPEN) {
+      socketRef.current.send(JSON.stringify({ type: 'audio_stream_stop' }));
     }
   };
 
