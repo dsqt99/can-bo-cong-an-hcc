@@ -35,6 +35,7 @@ class SessionManager:
         self._stt_audio_queue: asyncio.Queue | None = None
         self._stt_stream_task: asyncio.Task | None = None
         self._last_stt_text = ""
+        self._stt_started_at: float | None = None
 
         # WebSocket state
         self._ws_closed = False
@@ -99,6 +100,9 @@ class SessionManager:
         if "bytes" in message:
             audio_data = message["bytes"]
             if self._stt_audio_queue is not None:
+                if self._stt_started_at:
+                    logger.info(f"⏱️ First backend PCM receive: {time.time() - self._stt_started_at:.2f}s")
+                    self._stt_started_at = None
                 await self._stt_audio_queue.put(audio_data)
             return
 
@@ -194,6 +198,7 @@ class SessionManager:
     async def _start_stt_stream(self):
         """Start streaming STT session with ElevenLabs."""
         logger.info("🎙️ _start_stt_stream begin")
+        self._stt_started_at = time.time()
         # Stop any existing stream first
         await self._stop_stt_stream()
 
@@ -214,9 +219,10 @@ class SessionManager:
                         "isFinal": False
                     })
 
-                final_text = await stream_stt.stream_transcribe(
+                final_text = await stream_stt.stream_transcribe_pcm(
                     self._stt_audio_queue,
                     on_partial=on_partial,
+                    timeout_after_done=2.0,
                 )
 
                 # Use final_text or last known text
