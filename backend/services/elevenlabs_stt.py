@@ -125,6 +125,112 @@ class ElevenLabsSTTService:
         else:
             logger.info(f"✅ ElevenLabs STT: model={self.model_id}, lang={self.language}")
 
+    async def stream_transcribe_pcm(
+        self,
+        audio_queue: asyncio.Queue,
+        on_partial: Optional[Callable] = None,
+        timeout_after_done: float = 2.0,
+    ) -> str:
+        """Forward PCM16 16kHz mono chunks to ElevenLabs realtime STT as they arrive."""
+        if not self.api_key:
+            logger.error("❌ Thiếu ELEVENLABS_API_KEY")
+            return ""
+
+        t_start = time.time()
+        uri = _build_ws_url(self.model_id, self.language, commit_strategy="manual")
+        headers = {"xi-api-key": self.api_key}
+        final_text = ""
+        partial_text = ""
+        send_done_event = asyncio.Event()
+
+        try:
+            t_ws_start = time.time()
+            async with websockets.connect(uri, additional_headers=headers) as ws:
+                logger.info(f"✅ ElevenLabs PCM STT WS kết nối: {time.time() - t_ws_start:.2f}s")
+
+                async def _send():
+                    total_sent = 0
+                    first_chunk_logged = False
+                    try:
+                        while True:
+                            chunk = await audio_queue.get()
+                            if chunk is None or chunk == b"":
+                                break
+                            if not first_chunk_logged:
+                                first_chunk_logged = True
+                                logger.info(f"⏱️ STT first PCM chunk after {time.time() - t_start:.2f}s")
+                            await ws.send(json.dumps({
+                                "message_type": "input_audio_chunk",
+                                "audio_base_64": base64.b64encode(chunk).decode("utf-8"),
+                                "sample_rate": self.sample_rate,
+                            }))
+                            total_sent += len(chunk)
+                        await ws.send(json.dumps({"message_type": "commit"}))
+                        logger.info(f"📤 PCM STT sent {total_sent} bytes and commit in {time.time() - t_start:.2f}s")
+                    except Exception as e:
+                        logger.error(f"❌ PCM STT send lỗi: {e}")
+                    finally:
+                        send_done_event.set()
+
+                async def _recv():
+                    nonlocal final_text, partial_text
+                    committed_segments: list[str] = []
+                    first_partial_logged = False
+                    try:
+                        while True:
+                            timeout = timeout_after_done if send_done_event.is_set() else 30.0
+                            try:
+                                msg = await asyncio.wait_for(ws.recv(), timeout=timeout)
+                            except asyncio.TimeoutError:
+                                break
+
+                            try:
+                                data = json.loads(msg)
+                            except json.JSONDecodeError:
+                                continue
+
+                            msg_type = data.get("message_type", "")
+                            text = data.get("text", "").strip()
+
+                            if msg_type == "session_started":
+                                logger.info(f"✅ STT session: {data.get('session_id', '')}")
+                            elif msg_type == "partial_transcript" and text:
+                                partial_text = text
+                                if not first_partial_logged:
+                                    first_partial_logged = True
+                                    logger.info(f"⏱️ STT first partial after {time.time() - t_start:.2f}s")
+                                if on_partial:
+                                    cb = on_partial(text, False)
+                                    if asyncio.iscoroutine(cb):
+                                        await cb
+                            elif msg_type == "committed_transcript" and text:
+                                committed_segments.append(text)
+                                logger.info(f"⏱️ STT committed segment after {time.time() - t_start:.2f}s")
+                                if on_partial:
+                                    cb = on_partial(text, True)
+                                    if asyncio.iscoroutine(cb):
+                                        await cb
+                                if send_done_event.is_set():
+                                    break
+                            elif msg_type == "error":
+                                err = data.get("error", "unknown")
+                                logger.error(f"❌ STT API error: {err}")
+                                if err not in ("insufficient_audio_activity", "commit_throttled"):
+                                    break
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.info("🔌 ElevenLabs PCM STT WS đóng")
+
+                    if committed_segments:
+                        final_text = " ".join(committed_segments)
+
+                await asyncio.gather(_send(), _recv())
+        except Exception as e:
+            logger.error(f"❌ ElevenLabs PCM STT lỗi: {e}")
+
+        result = final_text or partial_text
+        logger.info(f"📝 PCM STT result length={len(result)} total={time.time() - t_start:.2f}s")
+        return result
+
     async def stream_transcribe(
         self,
         audio_queue: asyncio.Queue,
