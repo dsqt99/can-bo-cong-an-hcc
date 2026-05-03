@@ -28,26 +28,29 @@ export const startPcmCapture = async ({
   const source = audioContext.createMediaStreamSource(stream);
 
   if (audioContext.audioWorklet) {
-    const url = createPcmWorkletUrl();
-    await audioContext.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
+    try {
+      const url = createPcmWorkletUrl();
+      await audioContext.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
 
-    const node = new AudioWorkletNode(audioContext, 'pcm-capture-processor');
-    node.port.onmessage = (event: MessageEvent<Float32Array>) => {
-      emitPcm(event.data, audioContext.sampleRate, onPcmChunk);
-    };
-    source.connect(node);
-    node.connect(audioContext.destination);
+      const node = new AudioWorkletNode(audioContext, 'pcm-capture-processor');
+      node.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        emitPcm(event.data, audioContext.sampleRate, onPcmChunk);
+      };
+      source.connect(node);
 
-    return {
-      source,
-      node,
-      stop: () => {
-        node.port.onmessage = null;
-        source.disconnect();
-        node.disconnect();
-      },
-    };
+      return {
+        source,
+        node,
+        stop: () => {
+          node.port.onmessage = null;
+          source.disconnect();
+          node.disconnect();
+        },
+      };
+    } catch (error) {
+      console.warn('AudioWorklet failed, falling back to ScriptProcessor:', error);
+    }
   }
 
   const node = audioContext.createScriptProcessor(4096, 1, 1);
